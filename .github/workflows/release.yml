@@ -20,7 +20,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Set up Go
         uses: actions/setup-go@v6
@@ -52,7 +52,7 @@ jobs:
         run: go build -v ./...
 
   build:
-    name: Build ${{ matrix.goos }}-${{ matrix.goarch }}
+    name: Build ${{ matrix.goos }}-${{ matrix.arch_name }}
     needs: validate
     runs-on: ubuntu-latest
 
@@ -60,27 +60,46 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Linux
           - goos: linux
             goarch: amd64
+            arch_name: amd64
 
           - goos: linux
             goarch: arm64
+            arch_name: arm64
 
+          - goos: linux
+            goarch: arm
+            goarm: '7'
+            arch_name: armv7
+
+          - goos: linux
+            goarch: arm
+            goarm: '6'
+            arch_name: armv6
+
+          # Windows
           - goos: windows
             goarch: amd64
+            arch_name: amd64
 
           - goos: windows
             goarch: arm64
+            arch_name: arm64
 
+          # macOS
           - goos: darwin
             goarch: amd64
+            arch_name: amd64
 
           - goos: darwin
             goarch: arm64
+            arch_name: arm64
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Set up Go
         uses: actions/setup-go@v6
@@ -91,6 +110,7 @@ jobs:
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm || '' }}
           CGO_ENABLED: 0
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
@@ -102,7 +122,7 @@ jobs:
             EXT=".exe"
           fi
 
-          BINARY="dnsway_${VERSION}_${GOOS}_${GOARCH}${EXT}"
+          BINARY="dnsway_${VERSION}_${GOOS}_${{ matrix.arch_name }}${EXT}"
 
           echo "Building ${BINARY}"
 
@@ -115,7 +135,7 @@ jobs:
       - name: Package archive
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          NAME="dnsway_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}"
+          NAME="dnsway_${VERSION}_${{ matrix.goos }}_${{ matrix.arch_name }}"
 
           mkdir -p release-assets
 
@@ -130,7 +150,7 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: dnsway-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: dnsway-${{ matrix.goos }}-${{ matrix.arch_name }}
           path: release-assets/*
           if-no-files-found: error
           retention-days: 1
@@ -155,17 +175,26 @@ jobs:
 
           COUNT=$(find release-assets -maxdepth 1 -type f | wc -l)
 
-          if [ "$COUNT" -ne 6 ]; then
-            echo "Expected 6 release archives, found $COUNT"
+          if [ "$COUNT" -ne 8 ]; then
+            echo "Expected 8 release archives, found $COUNT"
             exit 1
           fi
 
       - name: Create Draft Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
           name: DNSway ${{ github.ref_name }}
           draft: true
           prerelease: ${{ contains(github.ref_name, '-') }}
-          generate_release_notes: true
+          generate_release_notes: false
+          body: |
+            ## DNSway
+
+            - **Linux:** `.tar.gz` (AMD64 / ARM64 / ARMv7 / ARMv6).
+            - **Windows:** `.zip` (AMD64 / ARM64).
+            - **macOS (Darwin):** `.tar.gz` (Intel / Apple Silicon).
+
+            **Full Changelog**: https://github.com/GIFUS/dnsway/commits/${{ github.ref_name }}
           files: release-assets/*
+          fail_on_unmatched_files: true
