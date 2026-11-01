@@ -8,7 +8,6 @@ import (
 	"slices"
 	"sort"
 	"strings"
-	"sync"
 	"text/tabwriter"
 	"time"
 
@@ -76,15 +75,9 @@ func checkUpstreams(cfg *config.Config, resolvers map[string]upstream.Resolver) 
 		role := upstreamRole(cfg, name)
 		go func() {
 			probes := make([]probeResult, checkProbes)
-			var wg sync.WaitGroup
 			for i := range probes {
-				wg.Add(1)
-				go func(i int) {
-					defer wg.Done()
-					probes[i] = checkProbe(resolver, timeout)
-				}(i)
+				probes[i] = checkProbe(resolver, timeout)
 			}
-			wg.Wait()
 			ch <- summarize(name, u, role, probes)
 		}()
 	}
@@ -181,7 +174,11 @@ func printCache(out io.Writer, cfg *config.Config) {
 	if d := cfg.Cache.MaxTTL.Duration(); d > 0 {
 		maxTTL = d.String()
 	}
-	fmt.Fprintf(out, "Cache: enabled, max_size=%d, min_ttl=%s, max_ttl=%s\n", cfg.Cache.MaxSize, minTTL, maxTTL)
+	negativeTTL := "disabled"
+	if d := cfg.Cache.NegativeTTLDuration(); d > 0 {
+		negativeTTL = d.String()
+	}
+	fmt.Fprintf(out, "Cache: enabled, max_size=%d, min_ttl=%s, max_ttl=%s, negative_ttl=%s\n", cfg.Cache.MaxSize, minTTL, maxTTL, negativeTTL)
 }
 
 func printRules(out io.Writer, cfg *config.Config) {

@@ -25,6 +25,23 @@ func (f *fakeResolver) Exchange(ctx context.Context, req *dns.Msg) (*dns.Msg, er
 	return f.fn(ctx, req)
 }
 
+type overlapResolver struct {
+	active  atomic.Int32
+	overlap atomic.Bool
+}
+
+func (r *overlapResolver) Exchange(ctx context.Context, req *dns.Msg) (*dns.Msg, error) {
+	if r.active.Add(1) > 1 {
+		r.overlap.Store(true)
+	}
+	defer r.active.Add(-1)
+	time.Sleep(time.Millisecond)
+
+	resp := new(dns.Msg)
+	resp.SetReply(req)
+	return resp, nil
+}
+
 func fixedResolver(rcode int) *fakeResolver {
 	return &fakeResolver{fn: func(_ context.Context, req *dns.Msg) (*dns.Msg, error) {
 		resp := new(dns.Msg)
@@ -76,6 +93,61 @@ func TestCheckUpstreams(t *testing.T) {
 	}
 	if got := bad.calls.Load(); got != int32(checkProbes) {
 		t.Fatalf("bad probes = %d", got)
+	}
+}
+
+func TestCheckUpstreamsUsesSequentialProbes(t *testing.T) {
+	cfg := &config.Config{
+		DNS: config.DNS{
+			Timeout: config.Duration(time.Second),
+			Upstreams: map[string]config.Upstream{
+				"ok": {Address: "1.1.1.1:53", Protocol: "udp"},
+			},
+		},
+		Routing: config.Routing{Default: []string{"ok"}},
+	}
+	resolver := &overlapResolver{}
+
+	results := checkUpstreams(cfg, map[string]upstream.Resolver{"ok": resolver})
+	if resolver.overlap.Load() {
+		t.Fatal("probes for one upstream must not run concurrently")
+	}
+	if len(results) != 1 || results[0].successes != checkProbes {
+		t.Fatalf("results = %+v", results)
+	}
+}
+
+func TestCheckTimeoutUsesConfig(t *testing.T) {
+	cfg := &config.Config{DNS: config.DNS{Timeout: config.Duration(250 * time.Millisecond)}}
+	if got := checkTimeout(cfg); got != 250*time.Millisecond {
+		t.Fatalf("timeout = %v", got)
+	}
+
+	cfg.DNS.Timeout = 0
+	if got := checkTimeout(cfg); got != 3*time.Second {
+		t.Fatalf("default timeout = %v", got)
+	}
+}
+
+func TestPrintCacheNegativeTTL(t *testing.T) {
+	var out bytes.Buffer
+	zero := config.Duration(0)
+	printCache(&out, &config.Config{Cache: config.Cache{
+		Enabled:     true,
+		MaxSize:     10,
+		NegativeTTL: &zero,
+	}})
+	if !strings.Contains(out.String(), "negative_ttl=disabled") {
+		t.Fatalf("output = %q", out.String())
+	}
+
+	out.Reset()
+	printCache(&out, &config.Config{Cache: config.Cache{
+		Enabled: true,
+		MaxSize: 10,
+	}})
+	if !strings.Contains(out.String(), "negative_ttl=30s") {
+		t.Fatalf("output = %q", out.String())
 	}
 }
 
@@ -149,6 +221,7 @@ func TestRunCheck(t *testing.T) {
 		"Listen: 127.0.0.1:53",
 		"Strategy: first",
 		"Cache: enabled, max_size=1000",
+		"negative_ttl=30s",
 		"Bootstrap: good",
 		"[0] block",
 		"resolve_file",
