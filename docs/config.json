@@ -37,7 +37,7 @@
     }
   },
   "routing": {
-    "default": ["cloudflare", "google"],
+    "default": ["cloudflare-doh", "google-doh", "google-dot", "cloudflare-dot"],
     "strategy": "first"
   },
   "cache": {
