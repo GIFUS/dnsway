@@ -1,0 +1,171 @@
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Check formatting
+        run: |
+          if [ -n "$(gofmt -l .)" ]; then
+            echo "The following files need formatting:"
+            gofmt -l .
+            exit 1
+          fi
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Verify dependencies
+        run: go mod verify
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -v ./...
+
+      - name: Build
+        run: go build -v ./...
+
+  build:
+    name: Build ${{ matrix.goos }}-${{ matrix.goarch }}
+    needs: validate
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+
+          - goos: linux
+            goarch: arm64
+
+          - goos: windows
+            goarch: amd64
+
+          - goos: windows
+            goarch: arm64
+
+          - goos: darwin
+            goarch: amd64
+
+          - goos: darwin
+            goarch: arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+
+          mkdir -p dist
+
+          EXT=""
+          if [ "$GOOS" = "windows" ]; then
+            EXT=".exe"
+          fi
+
+          BINARY="dnsway_${VERSION}_${GOOS}_${GOARCH}${EXT}"
+
+          echo "Building ${BINARY}"
+
+          go build \
+            -trimpath \
+            -ldflags="-s -w" \
+            -o "dist/${BINARY}" \
+            ./cmd/dnsway
+
+      - name: Package archive
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          NAME="dnsway_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}"
+
+          mkdir -p release-assets
+
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            zip "release-assets/${NAME}.zip" \
+              "dist/${NAME}.exe"
+          else
+            tar -czf "release-assets/${NAME}.tar.gz" \
+              -C dist "${NAME}"
+          fi
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dnsway-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    name: Create Draft Release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          pattern: dnsway-*
+          merge-multiple: true
+
+      - name: Verify release assets
+        run: |
+          echo "Release assets:"
+          ls -lh release-assets
+
+          COUNT=$(find release-assets -maxdepth 1 -type f | wc -l)
+
+          if [ "$COUNT" -ne 6 ]; then
+            echo "Expected 6 release archives, found $COUNT"
+            exit 1
+          fi
+
+      - name: Create Draft Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: DNSway ${{ github.ref_name }}
+          draft: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true
+          files: release-assets/*
