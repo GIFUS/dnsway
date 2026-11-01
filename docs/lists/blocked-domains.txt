@@ -1,0 +1,7 @@
+# Real advertising/tracking domains
+*.doubleclick.net
+*.googlesyndication.com
+*.googleadservices.com
+
+# Google
+*.google.com

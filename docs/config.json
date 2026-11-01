@@ -1,0 +1,70 @@
+{
+  "dns": {
+    "listen": "0.0.0.0:53",
+    "timeout": "3s",
+    "bootstrap": ["cloudflare", "google"],
+    "upstreams": {
+      "cloudflare": {
+        "address": "1.1.1.1:53",
+        "protocol": "udp"
+      },
+      "google": {
+        "address": "8.8.8.8:53",
+        "protocol": "udp"
+      },
+      "cloudflare-dot": {
+        "address": "1.1.1.1:853",
+        "protocol": "dot",
+        "server_name": "cloudflare-dns.com"
+      },
+      "google-dot": {
+        "address": "8.8.8.8:853",
+        "protocol": "dot",
+        "server_name": "dns.google"
+      },
+      "cloudflare-doh": {
+        "address": "https://cloudflare-dns.com/dns-query",
+        "protocol": "doh"
+      },
+      "google-doh": {
+        "address": "https://dns.google/dns-query",
+        "protocol": "doh"
+      },
+      "local": {
+        "address": "192.168.1.1:53",
+        "protocol": "udp"
+      }
+    }
+  },
+  "routing": {
+    "default": ["cloudflare", "google"],
+    "strategy": "first"
+  },
+  "cache": {
+    "enabled": true,
+    "max_size": 100000,
+    "min_ttl": "10s",
+    "max_ttl": "24h"
+  },
+  "rules": [
+    {
+      "match_file": "lists/blocked-domains.txt",
+      "block": true
+    },
+    {
+      "match": ["printer.home.arpa"],
+      "resolve": "192.168.1.100"
+    },
+    {
+      "resolve_file": ["hosts/local.hosts", "hosts/docker.hosts", "hosts/custom.hosts"]
+    },
+    {
+      "match_file": "lists/cloudflare-domains.txt",
+      "servers": ["cloudflare"]
+    },
+    {
+      "match_file": "lists/local-domains.txt",
+      "servers": ["local"]
+    }
+  ]
+}

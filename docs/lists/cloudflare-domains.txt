@@ -1,0 +1,4 @@
+# Real domains routed only to Cloudflare
+*.example.com
+*.wikipedia.org
+*.github.com

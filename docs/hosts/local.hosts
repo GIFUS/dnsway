@@ -1,0 +1,11 @@
+# Local servers
+192.168.1.10 nas.home.arpa
+192.168.1.20 media.home.arpa
+192.168.1.30 api.home.arpa
+
+# Multiple domains for one IP
+192.168.1.40 backend.home.arpa gateway.home.arpa
+
+# IPv6
+fd00::10 nas.home.arpa
+fd00::20 media.home.arpa

@@ -1,0 +1,3 @@
+# Local DNS fallback
+*.home.arpa
+*.lan
