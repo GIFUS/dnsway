@@ -38,6 +38,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Cache.MaxSize != 100000 {
 		t.Fatalf("max_size = %d", cfg.Cache.MaxSize)
 	}
+	if got := cfg.Cache.NegativeTTLDuration(); got != 30*time.Second {
+		t.Fatalf("negative_ttl = %v", got)
+	}
 }
 
 func TestLoadValid(t *testing.T) {
@@ -48,11 +51,28 @@ func TestLoadValid(t *testing.T) {
 			"upstreams": {"cf": {"address": "1.1.1.1:53", "protocol": "udp"}}
 		},
 		"routing": {"default": ["cf"], "strategy": "round_robin"},
-		"cache": {"enabled": true, "max_size": 10, "min_ttl": "1s", "max_ttl": "1h"},
+		"cache": {"enabled": true, "max_size": 10, "min_ttl": "1s", "max_ttl": "1h", "negative_ttl": "45s"},
 		"rules": [{"match": ["example.com"], "resolve": "192.168.1.2"}]
 	}`)
 	if cfg.Routing.Strategy != "round_robin" {
 		t.Fatalf("strategy = %q", cfg.Routing.Strategy)
+	}
+	if got := cfg.Cache.NegativeTTLDuration(); got != 45*time.Second {
+		t.Fatalf("negative_ttl = %v", got)
+	}
+}
+
+func TestLoadExplicitZeroNegativeTTL(t *testing.T) {
+	cfg := load(t, `{
+		"dns": {
+			"listen": "127.0.0.1:53",
+			"upstreams": {"cf": {"address": "1.1.1.1:53", "protocol": "udp"}}
+		},
+		"routing": {"default": ["cf"]},
+		"cache": {"negative_ttl": "0s"}
+	}`)
+	if got := cfg.Cache.NegativeTTLDuration(); got != 0 {
+		t.Fatalf("negative_ttl = %v", got)
 	}
 }
 
@@ -86,6 +106,11 @@ func TestLoadInvalid(t *testing.T) {
 			name: "bad protocol",
 			body: `{"dns":{"listen":"127.0.0.1:53","upstreams":{"cf":{"address":"1.1.1.1:53","protocol":"quic"}}},"routing":{"default":["cf"]}}`,
 			want: "unsupported protocol",
+		},
+		{
+			name: "negative negative ttl",
+			body: `{"dns":{"listen":"127.0.0.1:53","upstreams":{"cf":{"address":"1.1.1.1:53","protocol":"udp"}}},"routing":{"default":["cf"]},"cache":{"negative_ttl":"-1s"}}`,
+			want: "cache.negative_ttl",
 		},
 	}
 	for _, tt := range tests {

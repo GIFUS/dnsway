@@ -64,7 +64,7 @@ func run() error {
 	resolvers := upstream.New(cfg)
 	var c *cache.Cache
 	if cfg.Cache.Enabled {
-		c = cache.New(cfg.Cache.MaxSize, cfg.Cache.MinTTL.Duration(), cfg.Cache.MaxTTL.Duration())
+		c = cache.New(cfg.Cache.MaxSize, cfg.Cache.MinTTL.Duration(), cfg.Cache.MaxTTL.Duration(), cfg.Cache.NegativeTTLDuration())
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

@@ -21,6 +21,11 @@ type Resolver interface {
 	Exchange(ctx context.Context, req *dns.Msg) (*dns.Msg, error)
 }
 
+const (
+	maxIdleStreamConns = 4
+	streamIdleTimeout  = 90 * time.Second
+)
+
 type dialFunc func(ctx context.Context, network, address string) (net.Conn, error)
 
 type Client struct {
@@ -31,6 +36,8 @@ type Client struct {
 	timeout    time.Duration
 	dial       dialFunc
 	http       *http.Client
+	tlsConfig  *tls.Config
+	pool       *streamPool
 }
 
 func New(cfg *config.Config) map[string]Resolver {
@@ -66,17 +73,102 @@ func newClient(name string, u config.Upstream, timeout time.Duration, dial dialF
 		dial:       dial,
 	}
 	if u.Protocol == "doh" {
-		c.http = &http.Client{
-			Timeout: timeout,
-			Transport: &http.Transport{
-				ForceAttemptHTTP2: true,
-				DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
-					return dial(ctx, network, address)
-				},
-			},
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.Proxy = nil
+		transport.DialContext = dial
+		transport.ForceAttemptHTTP2 = true
+		transport.MaxIdleConns = 100
+		transport.MaxIdleConnsPerHost = 10
+		transport.IdleConnTimeout = streamIdleTimeout
+		transport.TLSHandshakeTimeout = timeout
+		transport.ExpectContinueTimeout = time.Second
+		c.http = &http.Client{Timeout: timeout, Transport: transport}
+		return c
+	}
+
+	c.pool = newStreamPool(maxIdleStreamConns, streamIdleTimeout)
+	if u.Protocol == "dot" {
+		c.tlsConfig = &tls.Config{
+			ServerName:         u.ServerName,
+			MinVersion:         tls.VersionTLS12,
+			ClientSessionCache: tls.NewLRUClientSessionCache(64),
 		}
 	}
 	return c
+}
+
+func (c *Client) Close() error {
+	if c.pool != nil {
+		c.pool.close()
+	}
+	if c.http != nil {
+		c.http.CloseIdleConnections()
+	}
+	return nil
+}
+
+type pooledConn struct {
+	conn     *dns.Conn
+	lastUsed time.Time
+}
+
+type streamPool struct {
+	mu          sync.Mutex
+	idle        []pooledConn
+	maxIdle     int
+	idleTimeout time.Duration
+}
+
+func newStreamPool(maxIdle int, idleTimeout time.Duration) *streamPool {
+	return &streamPool{maxIdle: maxIdle, idleTimeout: idleTimeout}
+}
+
+func (p *streamPool) get() *dns.Conn {
+	now := time.Now()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	for len(p.idle) > 0 {
+		last := len(p.idle) - 1
+		item := p.idle[last]
+		p.idle = p.idle[:last]
+		if p.idleTimeout > 0 && now.Sub(item.lastUsed) >= p.idleTimeout {
+			_ = item.conn.Conn.Close()
+			continue
+		}
+		return item.conn
+	}
+	return nil
+}
+
+func (p *streamPool) put(conn *dns.Conn) {
+	if conn == nil {
+		return
+	}
+	if p.maxIdle <= 0 {
+		_ = conn.Conn.Close()
+		return
+	}
+
+	p.mu.Lock()
+	if len(p.idle) >= p.maxIdle {
+		p.mu.Unlock()
+		_ = conn.Conn.Close()
+		return
+	}
+	p.idle = append(p.idle, pooledConn{conn: conn, lastUsed: time.Now()})
+	p.mu.Unlock()
+}
+
+func (p *streamPool) close() {
+	p.mu.Lock()
+	idle := p.idle
+	p.idle = nil
+	p.mu.Unlock()
+
+	for _, item := range idle {
+		_ = item.conn.Conn.Close()
+	}
 }
 
 func (c *Client) Exchange(ctx context.Context, req *dns.Msg) (*dns.Msg, error) {
@@ -106,38 +198,86 @@ func (c *Client) Exchange(ctx context.Context, req *dns.Msg) (*dns.Msg, error) {
 }
 
 func (c *Client) exchangeStream(ctx context.Context, network string, useTLS bool, req *dns.Msg) (*dns.Msg, error) {
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		dc, reused, err := c.streamConn(ctx, network, useTLS)
+		if err != nil {
+			return nil, err
+		}
+
+		resp, err := c.exchangeConn(ctx, dc, req)
+		if err == nil {
+			if network == "tcp" && c.pool != nil {
+				c.pool.put(dc)
+			} else {
+				_ = dc.Conn.Close()
+			}
+			return resp, nil
+		}
+		_ = dc.Conn.Close()
+		lastErr = err
+		if !reused || ctx.Err() != nil {
+			break
+		}
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("%s: exchange failed", c.name)
+	}
+	return nil, lastErr
+}
+
+func (c *Client) streamConn(ctx context.Context, network string, useTLS bool) (*dns.Conn, bool, error) {
+	if network == "tcp" && c.pool != nil {
+		if dc := c.pool.get(); dc != nil {
+			return dc, true, nil
+		}
+	}
+
 	conn, err := c.dial(ctx, network, c.address)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", c.name, err)
+		return nil, false, fmt.Errorf("%s: %w", c.name, err)
 	}
-	defer conn.Close()
-	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
-	defer stop()
-
-	if deadline, ok := ctx.Deadline(); ok {
-		_ = conn.SetDeadline(deadline)
-	} else {
-		_ = conn.SetDeadline(time.Now().Add(c.timeout))
-	}
-
 	if useTLS {
-		tlsConn := tls.Client(conn, &tls.Config{
-			ServerName: c.serverName,
-			MinVersion: tls.VersionTLS12,
-		})
+		cfg := c.tlsConfig
+		if cfg == nil {
+			cfg = &tls.Config{ServerName: c.serverName, MinVersion: tls.VersionTLS12}
+		}
+		tlsConn := tls.Client(conn, cfg)
 		if err := tlsConn.HandshakeContext(ctx); err != nil {
-			return nil, fmt.Errorf("%s: tls: %w", c.name, err)
+			_ = conn.Close()
+			return nil, false, fmt.Errorf("%s: tls: %w", c.name, err)
 		}
 		conn = tlsConn
 	}
+	return &dns.Conn{Conn: conn, UDPSize: dns.MaxMsgSize}, false, nil
+}
 
-	dc := &dns.Conn{Conn: conn, UDPSize: dns.MaxMsgSize}
+func (c *Client) exchangeConn(ctx context.Context, dc *dns.Conn, req *dns.Msg) (*dns.Msg, error) {
+	stop := context.AfterFunc(ctx, func() { _ = dc.Conn.Close() })
+	defer stop()
+
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = dc.Conn.SetDeadline(deadline)
+	} else {
+		_ = dc.Conn.SetDeadline(time.Now().Add(c.timeout))
+	}
+
 	if err := dc.WriteMsg(req); err != nil {
 		return nil, fmt.Errorf("%s: write: %w", c.name, err)
 	}
 	resp, err := dc.ReadMsg()
 	if err != nil {
 		return nil, fmt.Errorf("%s: read: %w", c.name, err)
+	}
+	if !stop() {
+		_ = dc.Conn.Close()
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("%s: %w", c.name, err)
+		}
+		return nil, fmt.Errorf("%s: connection canceled", c.name)
+	}
+	if err := dc.Conn.SetDeadline(time.Time{}); err != nil {
+		return nil, fmt.Errorf("%s: reset deadline: %w", c.name, err)
 	}
 	return resp, nil
 }

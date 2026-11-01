@@ -5,7 +5,6 @@ import (
 	"math/rand/v2"
 	"net/netip"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -124,52 +123,113 @@ func (r *Router) exchangeOne(ctx context.Context, req *dns.Msg, name string) *dn
 	return resp
 }
 
+type firstOutcome struct {
+	index int
+	resp  *dns.Msg
+	valid bool
+}
+
 func (r *Router) exchangeFirst(ctx context.Context, req *dns.Msg, servers []string) *dns.Msg {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	results := make(chan *dns.Msg, len(servers))
-	var wg sync.WaitGroup
-	for _, name := range servers {
+	results := make(chan firstOutcome, len(servers))
+	started := 0
+	for index, name := range servers {
 		resolver, ok := r.upstreams[name]
 		if !ok {
 			continue
 		}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		started++
+		go func(index int, resolver upstream.Resolver) {
 			resp, err := resolver.Exchange(ctx, req.Copy())
-			if err != nil || !validResponse(req, resp) {
-				return
+			outcome := firstOutcome{index: index, resp: resp}
+			if err == nil {
+				outcome.valid = validEnvelope(req, resp) && !resp.Truncated
 			}
 			select {
-			case results <- resp:
+			case results <- outcome:
 			case <-ctx.Done():
 			}
-		}()
+		}(index, resolver)
 	}
-	go func() {
-		wg.Wait()
-		close(results)
-	}()
-
-	resp, ok := <-results
-	if !ok {
+	if started == 0 {
 		return nil
 	}
-	cancel()
-	return resp
+
+	var best *dns.Msg
+	bestPriority := 0
+	bestIndex := -1
+	received := 0
+	allValid := true
+	qtype := req.Question[0].Qtype
+	for received < started {
+		select {
+		case outcome := <-results:
+			received++
+			if !outcome.valid {
+				allValid = false
+				continue
+			}
+			if positiveResponse(outcome.resp, qtype) {
+				cancel()
+				return outcome.resp
+			}
+			priority := responsePriority(outcome.resp)
+			if best == nil || priority > bestPriority || (priority == bestPriority && outcome.index > bestIndex) {
+				best = outcome.resp
+				bestPriority = priority
+				bestIndex = outcome.index
+			}
+		case <-ctx.Done():
+			return nil
+		}
+	}
+	if !allValid {
+		return nil
+	}
+	return best
 }
 
-func validResponse(req, resp *dns.Msg) bool {
+func validEnvelope(req, resp *dns.Msg) bool {
 	if resp == nil || resp.Id != req.Id || len(resp.Question) != 1 {
 		return false
 	}
 	q, rq := req.Question[0], resp.Question[0]
-	if q.Qtype != rq.Qtype || q.Qclass != rq.Qclass || !strings.EqualFold(q.Name, rq.Name) {
+	return q.Qtype == rq.Qtype && q.Qclass == rq.Qclass && strings.EqualFold(q.Name, rq.Name)
+}
+
+func validResponse(req, resp *dns.Msg) bool {
+	if !validEnvelope(req, resp) {
 		return false
 	}
 	return resp.Rcode == dns.RcodeSuccess || resp.Rcode == dns.RcodeNameError
+}
+
+func positiveResponse(resp *dns.Msg, qtype uint16) bool {
+	if resp.Rcode != dns.RcodeSuccess || resp.Truncated {
+		return false
+	}
+	if qtype == dns.TypeANY {
+		return len(resp.Answer) > 0
+	}
+	for _, rr := range resp.Answer {
+		if rr != nil && rr.Header().Rrtype == qtype {
+			return true
+		}
+	}
+	return false
+}
+
+func responsePriority(resp *dns.Msg) int {
+	switch resp.Rcode {
+	case dns.RcodeNameError:
+		return 3
+	case dns.RcodeSuccess:
+		return 2
+	default:
+		return 1
+	}
 }
 
 func cacheKey(req *dns.Msg) cache.Key {

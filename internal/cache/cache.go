@@ -37,12 +37,13 @@ type shard struct {
 }
 
 type Cache struct {
-	shards []shard
-	minTTL time.Duration
-	maxTTL time.Duration
+	shards      []shard
+	minTTL      time.Duration
+	maxTTL      time.Duration
+	negativeTTL time.Duration
 }
 
-func New(maxSize int, minTTL, maxTTL time.Duration) *Cache {
+func New(maxSize int, minTTL, maxTTL, negativeTTL time.Duration) *Cache {
 	if maxSize <= 0 {
 		maxSize = 100000
 	}
@@ -50,7 +51,12 @@ func New(maxSize int, minTTL, maxTTL time.Duration) *Cache {
 	if capacity < 1 {
 		capacity = 1
 	}
-	c := &Cache{shards: make([]shard, shardCount), minTTL: minTTL, maxTTL: maxTTL}
+	c := &Cache{
+		shards:      make([]shard, shardCount),
+		minTTL:      minTTL,
+		maxTTL:      maxTTL,
+		negativeTTL: negativeTTL,
+	}
 	for i := range c.shards {
 		c.shards[i] = shard{
 			lru:      list.New(),
@@ -86,7 +92,7 @@ func (c *Cache) Get(key Key, now time.Time) (*dns.Msg, bool) {
 }
 
 func (c *Cache) Store(key Key, msg *dns.Msg, now time.Time) {
-	ttl, ok := cacheTTL(msg, c.minTTL, c.maxTTL)
+	ttl, ok := cacheTTL(msg, c.minTTL, c.maxTTL, c.negativeTTL)
 	if !ok {
 		return
 	}
@@ -151,7 +157,7 @@ func hashKey(k Key) uint64 {
 	return h
 }
 
-func cacheTTL(msg *dns.Msg, minTTL, maxTTL time.Duration) (time.Duration, bool) {
+func cacheTTL(msg *dns.Msg, minTTL, maxTTL, fallbackNegativeTTL time.Duration) (time.Duration, bool) {
 	if msg.Truncated {
 		return 0, false
 	}
@@ -170,7 +176,13 @@ func cacheTTL(msg *dns.Msg, minTTL, maxTTL time.Duration) (time.Duration, bool) 
 		return 0, false
 	}
 	if seconds == 0 {
-		return 0, false
+		if !isNegativeResponse(msg) || fallbackNegativeTTL <= 0 {
+			return 0, false
+		}
+		seconds = uint32(fallbackNegativeTTL / time.Second)
+		if seconds == 0 {
+			return 0, false
+		}
 	}
 
 	ttl := time.Duration(seconds) * time.Second
@@ -184,6 +196,10 @@ func cacheTTL(msg *dns.Msg, minTTL, maxTTL time.Duration) (time.Duration, bool) 
 		return 0, false
 	}
 	return ttl, true
+}
+
+func isNegativeResponse(msg *dns.Msg) bool {
+	return msg.Rcode == dns.RcodeNameError || (msg.Rcode == dns.RcodeSuccess && len(msg.Answer) == 0)
 }
 
 func minRRTTL(rrs []dns.RR) uint32 {

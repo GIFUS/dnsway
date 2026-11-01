@@ -9,7 +9,7 @@ import (
 )
 
 func TestGetDecrementsTTL(t *testing.T) {
-	c := New(100, 0, 0)
+	c := New(100, 0, 0, 0)
 	key := Key{Name: "example.com", Type: dns.TypeA, Class: dns.ClassINET}
 	now := time.Unix(1000, 0)
 	c.Store(key, answerMsg("example.com.", "300"), now)
@@ -27,7 +27,7 @@ func TestGetDecrementsTTL(t *testing.T) {
 }
 
 func TestNegativeTTLUsesSOA(t *testing.T) {
-	c := New(100, 0, 0)
+	c := New(100, 0, 0, 30*time.Second)
 	key := Key{Name: "missing.com", Type: dns.TypeA, Class: dns.ClassINET}
 	now := time.Now()
 	msg := new(dns.Msg)
@@ -40,13 +40,69 @@ func TestNegativeTTLUsesSOA(t *testing.T) {
 	if _, ok := c.Get(key, now.Add(30*time.Second)); !ok {
 		t.Fatal("negative entry should be cached")
 	}
+	if _, ok := c.Get(key, now.Add(45*time.Second)); !ok {
+		t.Fatal("SOA TTL must take precedence over the fallback")
+	}
 	if _, ok := c.Get(key, now.Add(61*time.Second)); ok {
 		t.Fatal("negative entry should expire after SOA minimum")
 	}
 }
 
+func TestNegativeTTLFallsBackWithoutSOA(t *testing.T) {
+	c := New(100, 0, 0, 30*time.Second)
+	key := Key{Name: "missing.com", Type: dns.TypeA, Class: dns.ClassINET}
+	now := time.Now()
+	c.Store(key, negativeMsg("missing.com.", dns.RcodeNameError), now)
+
+	if _, ok := c.Get(key, now.Add(29*time.Second)); !ok {
+		t.Fatal("negative entry should use the fallback TTL")
+	}
+	if _, ok := c.Get(key, now.Add(31*time.Second)); ok {
+		t.Fatal("negative entry should expire after the fallback TTL")
+	}
+}
+
+func TestNODATAFallsBackWithoutSOA(t *testing.T) {
+	c := New(100, 0, 0, 30*time.Second)
+	key := Key{Name: "nodata.com", Type: dns.TypeA, Class: dns.ClassINET}
+	now := time.Now()
+	c.Store(key, negativeMsg("nodata.com.", dns.RcodeSuccess), now)
+
+	if _, ok := c.Get(key, now.Add(29*time.Second)); !ok {
+		t.Fatal("NODATA entry should use the fallback TTL")
+	}
+	if _, ok := c.Get(key, now.Add(31*time.Second)); ok {
+		t.Fatal("NODATA entry should expire after the fallback TTL")
+	}
+}
+
+func TestNegativeTTLDisabled(t *testing.T) {
+	c := New(100, 0, 0, 0)
+	key := Key{Name: "missing.com", Type: dns.TypeA, Class: dns.ClassINET}
+	now := time.Now()
+	c.Store(key, negativeMsg("missing.com.", dns.RcodeNameError), now)
+
+	if _, ok := c.Get(key, now); ok {
+		t.Fatal("negative entry must not be cached when the fallback is disabled")
+	}
+}
+
+func TestNegativeTTLClampedByMaxTTL(t *testing.T) {
+	c := New(100, 0, 10*time.Second, 30*time.Second)
+	key := Key{Name: "missing.com", Type: dns.TypeA, Class: dns.ClassINET}
+	now := time.Now()
+	c.Store(key, negativeMsg("missing.com.", dns.RcodeNameError), now)
+
+	if _, ok := c.Get(key, now.Add(9*time.Second)); !ok {
+		t.Fatal("negative entry should be cached")
+	}
+	if _, ok := c.Get(key, now.Add(11*time.Second)); ok {
+		t.Fatal("negative entry should respect max_ttl")
+	}
+}
+
 func TestClampTTL(t *testing.T) {
-	c := New(100, 10*time.Second, time.Hour)
+	c := New(100, 10*time.Second, time.Hour, 0)
 	now := time.Now()
 
 	low := Key{Name: "low.com", Type: dns.TypeA, Class: dns.ClassINET}
@@ -65,15 +121,12 @@ func TestClampTTL(t *testing.T) {
 }
 
 func TestDoesNotCacheErrors(t *testing.T) {
-	c := New(100, 0, 0)
+	c := New(100, 0, 0, 30*time.Second)
 	key := Key{Name: "fail.com", Type: dns.TypeA, Class: dns.ClassINET}
 	now := time.Now()
 
-	msg := new(dns.Msg)
-	msg.SetQuestion("fail.com.", dns.TypeA)
-	msg.Response = true
-	msg.Rcode = dns.RcodeServerFailure
-	c.Store(key, msg, now)
+	c.Store(key, negativeMsg("fail.com.", dns.RcodeServerFailure), now)
+	c.Store(key, negativeMsg("fail.com.", dns.RcodeRefused), now)
 
 	truncated := answerMsg("fail.com.", "300")
 	truncated.Truncated = true
@@ -85,7 +138,7 @@ func TestDoesNotCacheErrors(t *testing.T) {
 }
 
 func TestEviction(t *testing.T) {
-	c := New(shardCount, 0, 0)
+	c := New(shardCount, 0, 0, 0)
 	now := time.Now()
 	var keys []Key
 	for i := 0; i < 100; i++ {
@@ -106,7 +159,7 @@ func TestEviction(t *testing.T) {
 }
 
 func TestClear(t *testing.T) {
-	c := New(100, 0, 0)
+	c := New(100, 0, 0, 0)
 	key := Key{Name: "clear.com", Type: dns.TypeA, Class: dns.ClassINET}
 	now := time.Now()
 	c.Store(key, answerMsg("clear.com.", "300"), now)
@@ -121,6 +174,14 @@ func answerMsg(name, ttl string) *dns.Msg {
 	msg.SetQuestion(name, dns.TypeA)
 	msg.Response = true
 	msg.Answer = []dns.RR{mustRR(name + " " + ttl + " IN A 1.2.3.4")}
+	return msg
+}
+
+func negativeMsg(name string, rcode int) *dns.Msg {
+	msg := new(dns.Msg)
+	msg.SetQuestion(name, dns.TypeA)
+	msg.Response = true
+	msg.Rcode = rcode
 	return msg
 }
 

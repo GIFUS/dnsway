@@ -56,11 +56,21 @@ type Routing struct {
 	Strategy string   `json:"strategy"`
 }
 
+const defaultNegativeTTL = 30 * time.Second
+
 type Cache struct {
-	Enabled bool     `json:"enabled"`
-	MaxSize int      `json:"max_size"`
-	MinTTL  Duration `json:"min_ttl"`
-	MaxTTL  Duration `json:"max_ttl"`
+	Enabled     bool      `json:"enabled"`
+	MaxSize     int       `json:"max_size"`
+	MinTTL      Duration  `json:"min_ttl"`
+	MaxTTL      Duration  `json:"max_ttl"`
+	NegativeTTL *Duration `json:"negative_ttl"`
+}
+
+func (c Cache) NegativeTTLDuration() time.Duration {
+	if c.NegativeTTL == nil {
+		return defaultNegativeTTL
+	}
+	return c.NegativeTTL.Duration()
 }
 
 type Rule struct {
@@ -186,6 +196,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Cache.MinTTL < 0 || c.Cache.MaxTTL < 0 {
 		return fmt.Errorf("cache TTL values must not be negative")
+	}
+	if c.Cache.NegativeTTL != nil && c.Cache.NegativeTTL.Duration() < 0 {
+		return fmt.Errorf("cache.negative_ttl must not be negative")
 	}
 	if c.Cache.MaxTTL > 0 && c.Cache.MinTTL > c.Cache.MaxTTL {
 		return fmt.Errorf("cache.min_ttl must not exceed cache.max_ttl")
