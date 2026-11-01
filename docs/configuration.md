@@ -274,9 +274,9 @@ A non-empty list of upstream IDs. It is used only when no rule matches. Even if
 }
 ```
 
-Every ID must exist in `dns.upstreams`. The order matters for `first` only in
-terms of which requests are started; all listed upstreams are raced. For
-`random` and `round_robin`, the list is the pool of selectable upstreams.
+Every ID must exist in `dns.upstreams`. For `first`, all upstreams are raced;
+the list order only breaks fallback ties. For `random` and `round_robin`, the
+list is the selection pool.
 
 ### `routing.strategy`
 
@@ -284,23 +284,19 @@ Controls how multiple upstreams are used for one forwarded query.
 
 | Strategy | Behavior |
 | --- | --- |
-| `first` | Query all selected upstreams in parallel and use the first valid response |
+| `first` | Query all selected upstreams in parallel and use the first successful response |
 | `random` | Pick one upstream at random for each request |
 | `round_robin` | Rotate through the selected upstreams using a global counter |
 
-For `first`, a response is valid when:
+`first` races all selected upstreams. A successful response is a non-truncated
+`NOERROR` answer containing a record of the requested type (`ANY`: any
+non-empty answer). `NXDOMAIN`, NODATA, and DNS errors are only fallbacks.
 
-- it has the same request ID and question as the query;
-- its question type and class match;
-- its name matches case-insensitively;
-- its response code is `NOERROR` or `NXDOMAIN`.
+If nothing succeeds, return `NXDOMAIN`, then NODATA, then another DNS error.
+Ties use the later upstream in the list. Return `SERVFAIL` if any upstream
+fails to return a valid, non-truncated response.
 
-`SERVFAIL` and `REFUSED` are ignored. A fast `NXDOMAIN` is considered valid and
-can win over a slower positive answer. If no upstream returns a valid response
-before `dns.timeout`, DNSway returns `SERVFAIL`.
-
-For `random` and `round_robin`, only one upstream is tried. If it fails, DNSway
-returns `SERVFAIL`; it does not retry another upstream in the same rule.
+`random` and `round_robin` use one upstream and return `SERVFAIL` on failure.
 
 ```json
 {
@@ -321,6 +317,7 @@ The optional `cache` section controls DNS response caching.
 | `max_size` | integer | no | `100000` | Approximate maximum number of cached responses |
 | `min_ttl` | duration | no | `0s` | Lower TTL bound; `0` disables it |
 | `max_ttl` | duration | no | `0s` | Upper TTL bound; `0` disables it |
+| `negative_ttl` | duration | no | `30s` | Fallback TTL when a negative response has no usable SOA; `0s` disables it |
 
 ```json
 {
@@ -328,29 +325,26 @@ The optional `cache` section controls DNS response caching.
     "enabled": true,
     "max_size": 100000,
     "min_ttl": "10s",
-    "max_ttl": "24h"
+    "max_ttl": "24h",
+    "negative_ttl": "30s"
   }
 }
 ```
 
 Cache behavior:
 
-- Only responses that were forwarded to an upstream are cached. Blocked and
-  local answers bypass the cache.
-- The cache key includes query name, query type, query class, whether EDNS was
-  present, and the EDNS `DO` bit.
-- Positive responses use the shortest TTL in the answer section.
-- Negative responses use the SOA TTL and SOA minimum.
-- `min_ttl` and `max_ttl` clamp both the cache lifetime and the TTLs returned
-  from cached records.
-- TTLs decay while a record sits in the cache.
-- `SERVFAIL`, `REFUSED`, truncated responses, and responses without a usable
-  TTL are not cached.
-- The cache is in memory only and is cleared when a watched list or hosts file
-  is reloaded.
-- `max_size` is distributed across 16 shards, so the effective total capacity
-  is approximate.
-- `min_ttl` must not exceed `max_ttl` when both are non-zero.
+- Only forwarded responses are cached; local and blocked answers bypass the
+  cache.
+- Key: name, type, class, EDNS presence, and the DO bit.
+- `NOERROR` with `Answer`: shortest Answer TTL; TTL `0` is not cached.
+- Negative (`NXDOMAIN`/NODATA): `min(SOA TTL, SOA MINIMUM)`. Without a usable
+  SOA, use `negative_ttl` (`30s` default; `0s` disables it).
+- `min_ttl`/`max_ttl` clamp lifetime and returned TTLs, including the fallback.
+  TTLs decay while cached.
+- `SERVFAIL`, `REFUSED`, and truncated responses are not cached.
+- In-memory only; cleared on list/hosts reload. `max_size` is approximate
+  across 16 shards.
+- `min_ttl` must not exceed `max_ttl`.
 
 ## `rules`
 
@@ -576,7 +570,7 @@ Configuration loading fails with a field-specific error when:
 | Unknown default upstream | `routing.default` references a missing ID |
 | Unsupported strategy | Strategy is not `first`, `random`, or `round_robin` |
 | Invalid cache size | `max_size` is negative |
-| Invalid cache TTL | Negative TTL or `min_ttl > max_ttl` |
+| Invalid cache TTL | Negative value or `min_ttl > max_ttl` |
 | No rule action | Rule has none of `block`, `resolve`, `servers`, `resolve_file` |
 | Multiple rule actions | Rule has more than one action |
 | Missing matcher | Rule has no `match`/`match_file` and is not `resolve_file` |
@@ -749,8 +743,8 @@ Set `routing` to:
 }
 ```
 
-Both upstreams are queried in parallel. The first valid `NOERROR` or `NXDOMAIN`
-response wins. A fast `NXDOMAIN` can beat a slower positive answer.
+Both upstreams are raced. The first successful positive response wins;
+`NXDOMAIN` and NODATA are only fallbacks.
 
 ### 7. Random or Round-Robin Selection
 

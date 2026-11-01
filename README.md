@@ -50,7 +50,7 @@ DNSway is built around one principle: **the first matching rule is the only rule
 
 **Performance**
 
-- **Parallel first answer.** With the `first` strategy, query all selected upstreams at once and use the fastest valid response.
+- **Parallel first answer.** With the `first` strategy, query all selected upstreams at once and use the first successful positive response; negative answers are only fallbacks.
 - **Bounded cache.** A sharded LRU cache with positive and negative TTL handling.
 - **UDP and TCP.** Both transports listen on the same address.
 - **Bootstrap resolution.** Resolve hostname-based upstreams through an IP-based bootstrap resolver.

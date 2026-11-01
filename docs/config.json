@@ -44,7 +44,8 @@
     "enabled": true,
     "max_size": 100000,
     "min_ttl": "10s",
-    "max_ttl": "24h"
+    "max_ttl": "24h",
+    "negative_ttl": "30s"
   },
   "rules": [
     {
