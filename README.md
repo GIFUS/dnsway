@@ -17,6 +17,12 @@
   </p>
 
   <p>
+    <img src="https://img.shields.io/github/license/GIFUS/dnsway?style=flat-square" alt="License">
+    <img src="https://img.shields.io/github/stars/GIFUS/dnsway?style=flat-square" alt="GitHub stars">
+    <img src="https://img.shields.io/github/v/release/GIFUS/dnsway?style=flat-square&label=release" alt="Latest release">
+  </p>
+
+  <p>
     <a href="#features">Features</a>
     ·
     <a href="#configuration">Configuration</a>
