@@ -47,6 +47,11 @@
     "max_ttl": "24h",
     "negative_ttl": "30s"
   },
+  "api": {
+    "enabled": false,
+    "listen": "127.0.0.1:8080",
+    "allowed_ips": ["127.0.0.1/32", "::1/128"]
+  },
   "rules": [
     {
       "match_file": "lists/blocked-domains.txt",

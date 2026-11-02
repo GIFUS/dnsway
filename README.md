@@ -64,6 +64,7 @@ DNSway is built around one principle: **the first matching rule is the only rule
 **Diagnostics**
 
 - **`-check` mode.** Validate the whole configuration and probe every upstream before starting.
+- **Stats API.** Optional HTTP `/stats` endpoint for cache, query, blocking, and latency metrics.
 - **Structured query logs.** See the matched rule, action, upstreams, cache state, response code, and latency.
 - **Configurable verbosity.** Use `debug`, `info`, `warn`, or `error`.
 

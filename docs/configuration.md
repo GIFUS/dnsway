@@ -36,6 +36,7 @@ The top-level sections are:
 | `dns` | yes | Listener, timeout, bootstrap, and upstream definitions |
 | `routing` | yes | Default upstreams and selection strategy |
 | `cache` | no | Cache size and TTL bounds |
+| `api` | no | HTTP statistics endpoint |
 | `rules` | no | Ordered request-processing rules |
 
 ## Minimal Configuration
@@ -346,6 +347,39 @@ Cache behavior:
   across 16 shards.
 - `min_ttl` must not exceed `max_ttl`.
 
+## `api`
+
+Optional HTTP API for runtime statistics.
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `enabled` | boolean | no | `false` | Enables the HTTP API |
+| `listen` | string | no | `127.0.0.1:8080` | HTTP listen address |
+| `allowed_ips` | array | no | loopback | Allowed IPs or CIDR ranges |
+
+```json
+{
+  "api": {
+    "enabled": true,
+    "listen": "127.0.0.1:8080",
+    "allowed_ips": ["127.0.0.1/32", "::1/128"]
+  }
+}
+```
+
+`GET /stats` returns:
+
+- `cache`: `enabled`, `entries`, and `max_size`;
+- `queries`: `total`, `blocked`, `rules`, `default`, `cache_hits`, and
+  `avg_elapsed_ms`;
+- `uptime_seconds`.
+
+`rules` counts all requests matched by any rule. `avg_elapsed_ms` is rounded to
+two decimal places. An empty `allowed_ips` permits only loopback. Requests from
+other IPs receive `403`; non-`GET` requests receive `405`. The API uses plain
+HTTP and has no authentication; restrict `allowed_ips` and bind it to a trusted
+interface.
+
 ## `rules`
 
 `rules` is an ordered array. Each request is checked against rules from top to
@@ -571,6 +605,8 @@ Configuration loading fails with a field-specific error when:
 | Unsupported strategy | Strategy is not `first`, `random`, or `round_robin` |
 | Invalid cache size | `max_size` is negative |
 | Invalid cache TTL | Negative value or `min_ttl > max_ttl` |
+| Invalid API listen | `api.listen` is not a valid `host:port` |
+| Invalid API IP | `api.allowed_ips` contains an invalid IP or CIDR |
 | No rule action | Rule has none of `block`, `resolve`, `servers`, `resolve_file` |
 | Multiple rule actions | Rule has more than one action |
 | Missing matcher | Rule has no `match`/`match_file` and is not `resolve_file` |
