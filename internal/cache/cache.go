@@ -132,6 +132,25 @@ func (c *Cache) Clear() {
 	}
 }
 
+func (c *Cache) Len(now time.Time) int {
+	total := 0
+	for i := range c.shards {
+		sh := &c.shards[i]
+		sh.mu.Lock()
+		for key, el := range sh.items {
+			it := el.Value.(*item)
+			if now.Sub(it.stored) >= it.ttl {
+				sh.lru.Remove(el)
+				delete(sh.items, key)
+				continue
+			}
+			total++
+		}
+		sh.mu.Unlock()
+	}
+	return total
+}
+
 func (c *Cache) shard(key Key) *shard {
 	return &c.shards[hashKey(key)%shardCount]
 }

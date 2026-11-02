@@ -10,11 +10,13 @@ import (
 	"os/signal"
 	"syscall"
 
+	"dnsway/internal/api"
 	"dnsway/internal/cache"
 	"dnsway/internal/config"
 	"dnsway/internal/router"
 	"dnsway/internal/rules"
 	"dnsway/internal/server"
+	"dnsway/internal/stats"
 	"dnsway/internal/upstream"
 	"dnsway/internal/watcher"
 )
@@ -66,6 +68,10 @@ func run() error {
 	if cfg.Cache.Enabled {
 		c = cache.New(cfg.Cache.MaxSize, cfg.Cache.MinTTL.Duration(), cfg.Cache.MaxTTL.Duration(), cfg.Cache.NegativeTTLDuration())
 	}
+	var collector *stats.Collector
+	if cfg.API.Enabled {
+		collector = stats.New()
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -84,14 +90,40 @@ func run() error {
 	}
 	go watch.Run(ctx)
 
-	srv := server.New(cfg.DNS.Listen, router.New(cfg, store, c, resolvers), logger)
+	srv := server.New(cfg.DNS.Listen, router.New(cfg, store, c, resolvers), logger, collector)
+	var apiSrv *api.Server
+	if cfg.API.Enabled {
+		apiSrv, err = api.New(cfg.API, collector, c, cfg.Cache.MaxSize)
+		if err != nil {
+			return err
+		}
+	}
 	logger.Info("starting dnsway",
 		"listen", cfg.DNS.Listen,
 		"upstreams", len(resolvers),
 		"rules", len(cfg.Rules),
 		"cache", c != nil,
+		"api", cfg.API.Enabled,
 	)
-	err = srv.Run(ctx)
+	if apiSrv == nil {
+		err = srv.Run(ctx)
+	} else {
+		err = runServices(ctx, srv, apiSrv)
+	}
 	logger.Info("dnsway stopped")
+	return err
+}
+
+func runServices(ctx context.Context, dnsSrv *server.Server, apiSrv *api.Server) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	errs := make(chan error, 2)
+	go func() { errs <- dnsSrv.Run(ctx) }()
+	go func() { errs <- apiSrv.Run(ctx) }()
+
+	err := <-errs
+	cancel()
+	<-errs
 	return err
 }

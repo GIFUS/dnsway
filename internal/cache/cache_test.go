@@ -158,6 +158,20 @@ func TestEviction(t *testing.T) {
 	}
 }
 
+func TestLen(t *testing.T) {
+	c := New(100, 0, 0, 0)
+	now := time.Now()
+	key := Key{Name: "count.com", Type: dns.TypeA, Class: dns.ClassINET}
+	c.Store(key, answerMsg("count.com.", "300"), now)
+
+	if got := c.Len(now.Add(100 * time.Second)); got != 1 {
+		t.Fatalf("len = %d", got)
+	}
+	if got := c.Len(now.Add(301 * time.Second)); got != 0 {
+		t.Fatalf("expired len = %d", got)
+	}
+}
+
 func TestClear(t *testing.T) {
 	c := New(100, 0, 0, 0)
 	key := Key{Name: "clear.com", Type: dns.TypeA, Class: dns.ClassINET}

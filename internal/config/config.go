@@ -34,6 +34,7 @@ type Config struct {
 	DNS     DNS     `json:"dns"`
 	Routing Routing `json:"routing"`
 	Cache   Cache   `json:"cache"`
+	API     API     `json:"api"`
 	Rules   []Rule  `json:"rules"`
 	Dir     string  `json:"-"`
 }
@@ -71,6 +72,12 @@ func (c Cache) NegativeTTLDuration() time.Duration {
 		return defaultNegativeTTL
 	}
 	return c.NegativeTTL.Duration()
+}
+
+type API struct {
+	Enabled    bool     `json:"enabled"`
+	Listen     string   `json:"listen"`
+	AllowedIPs []string `json:"allowed_ips"`
 }
 
 type Rule struct {
@@ -204,6 +211,20 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("cache.min_ttl must not exceed cache.max_ttl")
 	}
 
+	if c.API.Enabled && c.API.Listen == "" {
+		c.API.Listen = "127.0.0.1:8080"
+	}
+	if c.API.Listen != "" {
+		if err := validateListen(c.API.Listen); err != nil {
+			return fmt.Errorf("api.listen: %w", err)
+		}
+	}
+	for _, raw := range c.API.AllowedIPs {
+		if err := validateAllowedIP(raw); err != nil {
+			return fmt.Errorf("api.allowed_ips: %w", err)
+		}
+	}
+
 	for i, r := range c.Rules {
 		if err := c.validateRule(r); err != nil {
 			return fmt.Errorf("rules[%d]: %w", i, err)
@@ -299,6 +320,26 @@ func upstreamHost(u Upstream) string {
 		return ""
 	}
 	return host
+}
+
+func validateListen(addr string) error {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return err
+	}
+	return validPort(port)
+}
+
+func validateAllowedIP(raw string) error {
+	if raw == "" {
+		return fmt.Errorf("empty address")
+	}
+	if strings.Contains(raw, "/") {
+		_, err := netip.ParsePrefix(raw)
+		return err
+	}
+	_, err := netip.ParseAddr(raw)
+	return err
 }
 
 func validPort(port string) error {

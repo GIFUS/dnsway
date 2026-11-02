@@ -151,6 +151,32 @@ func TestPrintCacheNegativeTTL(t *testing.T) {
 	}
 }
 
+func TestPrintAPI(t *testing.T) {
+	var out bytes.Buffer
+
+	printAPI(&out, &config.Config{API: config.API{
+		Enabled:    true,
+		Listen:     "0.0.0.0:9000",
+		AllowedIPs: []string{"192.0.2.0/24"},
+	}})
+	if got := out.String(); !strings.Contains(got, "API: enabled, listen=0.0.0.0:9000, allowed_ips=192.0.2.0/24") {
+		t.Fatalf("output = %q", got)
+	}
+
+	out.Reset()
+	printAPI(&out, &config.Config{API: config.API{Enabled: true}})
+	if got := out.String(); !strings.Contains(got, "listen=127.0.0.1:8080") ||
+		!strings.Contains(got, "allowed_ips=127.0.0.1/32, ::1/128") {
+		t.Fatalf("output = %q", got)
+	}
+
+	out.Reset()
+	printAPI(&out, &config.Config{})
+	if got := out.String(); !strings.Contains(got, "API: disabled") {
+		t.Fatalf("output = %q", got)
+	}
+}
+
 func TestSummarizeProbes(t *testing.T) {
 	u := config.Upstream{Address: "1.1.1.1:53", Protocol: "udp"}
 
@@ -222,6 +248,7 @@ func TestRunCheck(t *testing.T) {
 		"Strategy: first",
 		"Cache: enabled, max_size=1000",
 		"negative_ttl=30s",
+		"API: disabled",
 		"Bootstrap: good",
 		"[0] block",
 		"resolve_file",

@@ -157,6 +157,7 @@ func printConfig(out io.Writer, path string, cfg *config.Config) {
 	fmt.Fprintf(out, "Timeout: %s\n", cfg.DNS.Timeout.Duration())
 	fmt.Fprintf(out, "Strategy: %s\n", cfg.Routing.Strategy)
 	printCache(out, cfg)
+	printAPI(out, cfg)
 	fmt.Fprintf(out, "Bootstrap: %s\n", listOrNone(cfg.DNS.Bootstrap))
 	fmt.Fprintf(out, "Default: %s\n", listOrNone(cfg.Routing.Default))
 }
@@ -179,6 +180,22 @@ func printCache(out io.Writer, cfg *config.Config) {
 		negativeTTL = d.String()
 	}
 	fmt.Fprintf(out, "Cache: enabled, max_size=%d, min_ttl=%s, max_ttl=%s, negative_ttl=%s\n", cfg.Cache.MaxSize, minTTL, maxTTL, negativeTTL)
+}
+
+func printAPI(out io.Writer, cfg *config.Config) {
+	if !cfg.API.Enabled {
+		fmt.Fprintln(out, "API: disabled")
+		return
+	}
+	listen := cfg.API.Listen
+	if listen == "" {
+		listen = "127.0.0.1:8080"
+	}
+	allowed := cfg.API.AllowedIPs
+	if len(allowed) == 0 {
+		allowed = []string{"127.0.0.1/32", "::1/128"}
+	}
+	fmt.Fprintf(out, "API: enabled, listen=%s, allowed_ips=%s\n", listen, strings.Join(allowed, ", "))
 }
 
 func printRules(out io.Writer, cfg *config.Config) {

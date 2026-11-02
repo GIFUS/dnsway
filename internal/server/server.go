@@ -10,6 +10,7 @@ import (
 	"github.com/miekg/dns"
 
 	"dnsway/internal/router"
+	"dnsway/internal/stats"
 )
 
 type Server struct {
@@ -17,18 +18,22 @@ type Server struct {
 	tcp *dns.Server
 }
 
-func New(addr string, r *router.Router, logger *slog.Logger) *Server {
-	handler := newHandler(r, logger)
+func New(addr string, r *router.Router, logger *slog.Logger, collector *stats.Collector) *Server {
+	handler := newHandler(r, logger, collector)
 	return &Server{
 		udp: &dns.Server{Addr: addr, Net: "udp", Handler: handler, UDPSize: dns.MaxMsgSize},
 		tcp: &dns.Server{Addr: addr, Net: "tcp", Handler: handler},
 	}
 }
 
-func newHandler(r *router.Router, logger *slog.Logger) dns.Handler {
+func newHandler(r *router.Router, logger *slog.Logger, collector *stats.Collector) dns.Handler {
 	return dns.HandlerFunc(func(w dns.ResponseWriter, req *dns.Msg) {
 		start := time.Now()
 		result := r.Resolve(context.Background(), req)
+		elapsed := time.Since(start)
+		if collector != nil {
+			collector.Record(result, elapsed)
+		}
 		answers := len(result.Msg.Answer)
 
 		proto := "tcp"
@@ -54,7 +59,7 @@ func newHandler(r *router.Router, logger *slog.Logger) dns.Handler {
 			"cache", result.CacheHit,
 			"rcode", rcodeName(result.Msg.Rcode),
 			"answers", answers,
-			"elapsed", time.Since(start).Round(time.Millisecond),
+			"elapsed", elapsed.Round(time.Millisecond),
 		)
 
 		_ = w.WriteMsg(result.Msg)

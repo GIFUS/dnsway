@@ -76,6 +76,26 @@ func TestLoadExplicitZeroNegativeTTL(t *testing.T) {
 	}
 }
 
+func TestLoadAPI(t *testing.T) {
+	cfg := load(t, `{
+		"dns": {
+			"listen": "127.0.0.1:53",
+			"upstreams": {"cf": {"address": "1.1.1.1:53", "protocol": "udp"}}
+		},
+		"routing": {"default": ["cf"]},
+		"api": {
+			"enabled": true,
+			"allowed_ips": ["127.0.0.1", "192.0.2.0/24"]
+		}
+	}`)
+	if !cfg.API.Enabled {
+		t.Fatal("api.enabled = false")
+	}
+	if cfg.API.Listen != "127.0.0.1:8080" {
+		t.Fatalf("api.listen = %q", cfg.API.Listen)
+	}
+}
+
 func TestLoadInvalid(t *testing.T) {
 	tests := []struct {
 		name string
@@ -111,6 +131,16 @@ func TestLoadInvalid(t *testing.T) {
 			name: "negative negative ttl",
 			body: `{"dns":{"listen":"127.0.0.1:53","upstreams":{"cf":{"address":"1.1.1.1:53","protocol":"udp"}}},"routing":{"default":["cf"]},"cache":{"negative_ttl":"-1s"}}`,
 			want: "cache.negative_ttl",
+		},
+		{
+			name: "invalid api listen",
+			body: `{"dns":{"listen":"127.0.0.1:53","upstreams":{"cf":{"address":"1.1.1.1:53","protocol":"udp"}}},"routing":{"default":["cf"]},"api":{"enabled":true,"listen":"127.0.0.1"}}`,
+			want: "api.listen",
+		},
+		{
+			name: "invalid api allowed ip",
+			body: `{"dns":{"listen":"127.0.0.1:53","upstreams":{"cf":{"address":"1.1.1.1:53","protocol":"udp"}}},"routing":{"default":["cf"]},"api":{"enabled":true,"allowed_ips":["not-an-ip"]}}`,
+			want: "api.allowed_ips",
 		},
 	}
 	for _, tt := range tests {

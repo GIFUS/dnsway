@@ -14,6 +14,7 @@ import (
 	"dnsway/internal/config"
 	"dnsway/internal/router"
 	"dnsway/internal/rules"
+	"dnsway/internal/stats"
 	"dnsway/internal/upstream"
 )
 
@@ -24,7 +25,8 @@ func TestHandlerServesUDP(t *testing.T) {
 	}
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logs, nil))
-	srv := &dns.Server{PacketConn: pc, Handler: newHandler(testRouter(t), logger)}
+	collector := stats.New()
+	srv := &dns.Server{PacketConn: pc, Handler: newHandler(testRouter(t), logger, collector)}
 	go func() { _ = srv.ActivateAndServe() }()
 	defer srv.Shutdown()
 
@@ -38,6 +40,9 @@ func TestHandlerServesUDP(t *testing.T) {
 	}
 	if len(resp.Answer) != 1 || resp.Answer[0].(*dns.A).A.String() != "1.2.3.4" {
 		t.Fatalf("answer = %v", resp.Answer)
+	}
+	if snapshot := collector.Snapshot(); snapshot.Queries.Total != 1 {
+		t.Fatalf("total queries = %d", snapshot.Queries.Total)
 	}
 
 	line := logs.String()
