@@ -262,7 +262,7 @@ a rule.
 | Field | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- |
 | `default` | array of strings | yes | none | Upstream IDs used when no rule matches |
-| `strategy` | string | no | `first` | `first`, `random`, or `round_robin` |
+| `strategy` | string | no | `first` | `fast`, `first`, or `round_robin` |
 
 ### `routing.default`
 
@@ -275,9 +275,9 @@ A non-empty list of upstream IDs. It is used only when no rule matches. Even if
 }
 ```
 
-Every ID must exist in `dns.upstreams`. For `first`, all upstreams are raced;
-the list order only breaks fallback ties. For `random` and `round_robin`, the
-list is the selection pool.
+Every ID must exist in `dns.upstreams`. For `first` and `fast`, all upstreams
+are raced. For `first`, the list order breaks fallback ties. For
+`round_robin`, the list is the selection pool.
 
 ### `routing.strategy`
 
@@ -285,19 +285,25 @@ Controls how multiple upstreams are used for one forwarded query.
 
 | Strategy | Behavior |
 | --- | --- |
-| `first` | Query all selected upstreams in parallel and use the first successful response |
-| `random` | Pick one upstream at random for each request |
+| `fast` | Race all upstreams and use the first valid `NOERROR` or `NXDOMAIN` response |
+| `first` | Race all upstreams and prefer the first successful positive response; negatives are fallbacks |
 | `round_robin` | Rotate through the selected upstreams using a global counter |
 
-`first` races all selected upstreams. A successful response is a non-truncated
-`NOERROR` answer containing a record of the requested type (`ANY`: any
-non-empty answer). `NXDOMAIN`, NODATA, and DNS errors are only fallbacks.
+`fast` returns the first valid `NOERROR` or `NXDOMAIN` response and cancels the
+remaining requests. It ignores `SERVFAIL`, `REFUSED`, transport errors, and
+other invalid responses. A fast `NXDOMAIN` can win over a slower positive
+answer.
 
-If nothing succeeds, return `NXDOMAIN`, then NODATA, then another DNS error.
-Ties use the later upstream in the list. Return `SERVFAIL` if any upstream
-fails to return a valid, non-truncated response.
+`first` requires a non-truncated `NOERROR` answer containing a record of the
+requested type (`ANY`: any non-empty answer). `NXDOMAIN`, NODATA, and DNS errors
+are only fallbacks.
 
-`random` and `round_robin` use one upstream and return `SERVFAIL` on failure.
+If nothing succeeds, `first` returns the best valid fallback: `NXDOMAIN`, then
+NODATA, then another DNS error. Ties use the later upstream in the list. A
+valid fallback is cached even if some upstreams fail or time out. If no usable
+response is available, DNSway returns `SERVFAIL`; `SERVFAIL` is never cached.
+
+`round_robin` uses one upstream and returns `SERVFAIL` on failure.
 
 ```json
 {
@@ -370,8 +376,9 @@ Optional HTTP API for runtime statistics.
 `GET /stats` returns:
 
 - `cache`: `enabled`, `entries`, and `max_size`;
-- `queries`: `total`, `blocked`, `rules`, `default`, `cache_hits`, and
-  `avg_elapsed_ms`;
+- `queries`: `total`, `blocked`, `rules`, `default`, `cache_hits`, `servfail`,
+  `upstream_errors`, `upstream_timeouts`, and `avg_elapsed_ms`;
+- `runtime`: `goroutines` and `active_queries`;
 - `uptime_seconds`.
 
 `rules` counts all requests matched by any rule. `avg_elapsed_ms` is rounded to
@@ -602,7 +609,7 @@ Configuration loading fails with a field-specific error when:
 | Hostname upstream without bootstrap | An upstream hostname cannot be resolved |
 | Empty `routing.default` | No default upstreams |
 | Unknown default upstream | `routing.default` references a missing ID |
-| Unsupported strategy | Strategy is not `first`, `random`, or `round_robin` |
+| Unsupported strategy | Strategy is not `fast`, `first`, or `round_robin` |
 | Invalid cache size | `max_size` is negative |
 | Invalid cache TTL | Negative value or `min_ttl > max_ttl` |
 | Invalid API listen | `api.listen` is not a valid `host:port` |
@@ -782,9 +789,19 @@ Set `routing` to:
 Both upstreams are raced. The first successful positive response wins;
 `NXDOMAIN` and NODATA are only fallbacks.
 
-### 7. Random or Round-Robin Selection
+### 7. Fast or Round-Robin Selection
 
-Use one upstream per request:
+Use the fastest valid response:
+
+```json
+{
+  "default": ["cloudflare", "google"],
+  "strategy": "fast"
+}
+```
+
+`fast` races all upstreams and accepts the first `NOERROR` or `NXDOMAIN`
+response. Use one upstream per request with `round_robin`:
 
 ```json
 {
@@ -793,8 +810,8 @@ Use one upstream per request:
 }
 ```
 
-`round_robin` rotates through the list. `random` picks a random entry. Neither
-retries another upstream after a failure.
+`round_robin` rotates through the list and does not retry another upstream
+after a failure.
 
 ### 8. Bootstrap for a Hostname Upstream
 

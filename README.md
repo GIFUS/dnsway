@@ -51,6 +51,7 @@ DNSway is built around one principle: **the first matching rule is the only rule
 **Performance**
 
 - **Parallel first answer.** With the `first` strategy, query all selected upstreams at once and use the first successful positive response; negative answers are only fallbacks.
+- **Fast answer.** With `fast`, use the first valid `NOERROR` or `NXDOMAIN` response without preferring positive answers.
 - **Bounded cache.** A sharded LRU cache with positive and negative TTL handling.
 - **UDP and TCP.** Both transports listen on the same address.
 - **Bootstrap resolution.** Resolve hostname-based upstreams through an IP-based bootstrap resolver.
@@ -171,7 +172,7 @@ DNSway is designed for trusted local networks.
 - The cache is memory-only and does not survive a restart.
 - Local rules synthesize only `A` and `AAAA` answers.
 - A request must contain exactly one question; otherwise DNSway returns `FORMERR`.
-- `random` and `round_robin` do not retry another upstream after a failure.
+- `round_robin` does not retry another upstream after a failure.
 
 ## Troubleshooting
 
