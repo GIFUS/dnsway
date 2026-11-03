@@ -90,7 +90,7 @@ func run() error {
 	}
 	go watch.Run(ctx)
 
-	srv := server.New(cfg.DNS.Listen, router.New(cfg, store, c, resolvers), logger, collector)
+	srv := server.New(cfg.DNS.Listen, router.New(cfg, store, c, resolvers, logger, collector), logger, collector)
 	var apiSrv *api.Server
 	if cfg.API.Enabled {
 		apiSrv, err = api.New(cfg.API, collector, c, cfg.Cache.MaxSize)

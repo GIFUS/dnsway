@@ -160,7 +160,7 @@ func (p *streamPool) put(conn *dns.Conn) {
 	p.mu.Unlock()
 }
 
-func (p *streamPool) close() {
+func (p *streamPool) clear() {
 	p.mu.Lock()
 	idle := p.idle
 	p.idle = nil
@@ -169,6 +169,10 @@ func (p *streamPool) close() {
 	for _, item := range idle {
 		_ = item.conn.Conn.Close()
 	}
+}
+
+func (p *streamPool) close() {
+	p.clear()
 }
 
 func (c *Client) Exchange(ctx context.Context, req *dns.Msg) (*dns.Msg, error) {
@@ -199,8 +203,9 @@ func (c *Client) Exchange(ctx context.Context, req *dns.Msg) (*dns.Msg, error) {
 
 func (c *Client) exchangeStream(ctx context.Context, network string, useTLS bool, req *dns.Msg) (*dns.Msg, error) {
 	var lastErr error
+	forceFresh := false
 	for attempt := 0; attempt < 2; attempt++ {
-		dc, reused, err := c.streamConn(ctx, network, useTLS)
+		dc, reused, err := c.streamConn(ctx, network, useTLS, forceFresh)
 		if err != nil {
 			return nil, err
 		}
@@ -219,6 +224,10 @@ func (c *Client) exchangeStream(ctx context.Context, network string, useTLS bool
 		if !reused || ctx.Err() != nil {
 			break
 		}
+		if c.pool != nil {
+			c.pool.clear()
+		}
+		forceFresh = true
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("%s: exchange failed", c.name)
@@ -226,8 +235,8 @@ func (c *Client) exchangeStream(ctx context.Context, network string, useTLS bool
 	return nil, lastErr
 }
 
-func (c *Client) streamConn(ctx context.Context, network string, useTLS bool) (*dns.Conn, bool, error) {
-	if network == "tcp" && c.pool != nil {
+func (c *Client) streamConn(ctx context.Context, network string, useTLS, forceFresh bool) (*dns.Conn, bool, error) {
+	if !forceFresh && network == "tcp" && c.pool != nil {
 		if dc := c.pool.get(); dc != nil {
 			return dc, true, nil
 		}

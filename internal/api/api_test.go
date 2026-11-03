@@ -54,6 +54,9 @@ func TestStatsEndpoint(t *testing.T) {
 	if body.Queries.AvgElapsedMS != 20 {
 		t.Fatalf("avg_elapsed_ms = %v", body.Queries.AvgElapsedMS)
 	}
+	if body.Runtime.Goroutines < 1 {
+		t.Fatalf("goroutines = %d", body.Runtime.Goroutines)
+	}
 }
 
 func TestRunServesStatsAndStops(t *testing.T) {

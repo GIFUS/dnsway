@@ -137,6 +137,45 @@ func TestTCPReusesConnections(t *testing.T) {
 	}
 }
 
+func TestTCPReconnectsStaleConnection(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	counted := &countingListener{Listener: listener}
+	srv := &dns.Server{
+		Listener:      counted,
+		Net:           "tcp",
+		MaxTCPQueries: 1,
+		Handler: dns.HandlerFunc(func(w dns.ResponseWriter, req *dns.Msg) {
+			resp, err := reply("1.2.3.4", req)
+			if err == nil {
+				_ = w.WriteMsg(resp)
+			}
+		}),
+	}
+	go func() { _ = srv.ActivateAndServe() }()
+	defer srv.Shutdown()
+
+	client := newClient("tcp", config.Upstream{Address: listener.Addr().String(), Protocol: "tcp"}, time.Second, directDial)
+	defer client.Close()
+
+	for i := 0; i < 2; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		resp, err := client.Exchange(ctx, query("example.com."))
+		cancel()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(resp.Answer) != 1 {
+			t.Fatalf("answer = %v", resp.Answer)
+		}
+	}
+	if got := counted.count.Load(); got != 2 {
+		t.Fatalf("TCP connections = %d, want 2", got)
+	}
+}
+
 func TestDoTReusesConnections(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

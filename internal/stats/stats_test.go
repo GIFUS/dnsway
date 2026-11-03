@@ -1,8 +1,11 @@
 package stats
 
 import (
+	"context"
 	"testing"
 	"time"
+
+	"github.com/miekg/dns"
 
 	"dnsway/internal/router"
 )
@@ -43,6 +46,30 @@ func TestSnapshotRoundsAverage(t *testing.T) {
 
 	if got := c.Snapshot().Queries.AvgElapsedMS; got != 10.33 {
 		t.Fatalf("avg_elapsed_ms = %v", got)
+	}
+}
+
+func TestSnapshotDiagnostics(t *testing.T) {
+	c := New()
+	c.QueryStarted()
+	c.ObserveUpstream("bad", -1, context.DeadlineExceeded, false)
+	msg := new(dns.Msg)
+	msg.Rcode = dns.RcodeServerFailure
+	c.Record(router.Result{Rule: "default", Msg: msg}, time.Millisecond)
+
+	snapshot := c.Snapshot()
+	if snapshot.Queries.Servfail != 1 {
+		t.Fatalf("servfail = %d", snapshot.Queries.Servfail)
+	}
+	if snapshot.Queries.UpstreamErrors != 1 || snapshot.Queries.UpstreamTimeouts != 1 {
+		t.Fatalf("upstream = %+v", snapshot.Queries)
+	}
+	if snapshot.Runtime.ActiveQueries != 1 || snapshot.Runtime.Goroutines < 1 {
+		t.Fatalf("runtime = %+v", snapshot.Runtime)
+	}
+	c.QueryFinished()
+	if got := c.Snapshot().Runtime.ActiveQueries; got != 0 {
+		t.Fatalf("active_queries = %d", got)
 	}
 }
 

@@ -28,6 +28,10 @@ func New(addr string, r *router.Router, logger *slog.Logger, collector *stats.Co
 
 func newHandler(r *router.Router, logger *slog.Logger, collector *stats.Collector) dns.Handler {
 	return dns.HandlerFunc(func(w dns.ResponseWriter, req *dns.Msg) {
+		if collector != nil {
+			collector.QueryStarted()
+			defer collector.QueryFinished()
+		}
 		start := time.Now()
 		result := r.Resolve(context.Background(), req)
 		elapsed := time.Since(start)

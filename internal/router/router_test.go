@@ -125,6 +125,71 @@ func TestFirstPrefersPositiveOverNXDOMAIN(t *testing.T) {
 	}
 }
 
+func TestFastReturnsFirstValidResponse(t *testing.T) {
+	negative := &fakeResolver{fn: func(req *dns.Msg) (*dns.Msg, error) {
+		return replyCode(req, dns.RcodeNameError), nil
+	}}
+	positive := &fakeResolver{fn: func(req *dns.Msg) (*dns.Msg, error) {
+		time.Sleep(30 * time.Millisecond)
+		return answer("1.1.1.1")(req)
+	}}
+	cfg := testConfig(nil)
+	cfg.Routing.Strategy = "fast"
+	cfg.Routing.Default = []string{"negative", "positive"}
+
+	r := newRouterWithConfig(t, cfg, map[string]upstream.Resolver{
+		"negative": negative,
+		"positive": positive,
+	}, nil)
+
+	resp := resolve(r, "example.com", dns.TypeA)
+	if resp.Rcode != dns.RcodeNameError {
+		t.Fatalf("rcode = %d", resp.Rcode)
+	}
+}
+
+func TestFastSkipsInvalidResponses(t *testing.T) {
+	servfail := &fakeResolver{fn: func(req *dns.Msg) (*dns.Msg, error) {
+		return replyCode(req, dns.RcodeServerFailure), nil
+	}}
+	positive := &fakeResolver{fn: func(req *dns.Msg) (*dns.Msg, error) {
+		time.Sleep(20 * time.Millisecond)
+		return answer("1.1.1.1")(req)
+	}}
+	cfg := testConfig(nil)
+	cfg.Routing.Strategy = "fast"
+	cfg.Routing.Default = []string{"servfail", "positive"}
+
+	r := newRouterWithConfig(t, cfg, map[string]upstream.Resolver{
+		"servfail": servfail,
+		"positive": positive,
+	}, nil)
+
+	resp := resolve(r, "example.com", dns.TypeA)
+	if len(resp.Answer) != 1 || resp.Answer[0].(*dns.A).A.String() != "1.1.1.1" {
+		t.Fatalf("answer = %v", resp.Answer)
+	}
+}
+
+func TestFastReturnsSERVFAILWhenAllResponsesAreInvalid(t *testing.T) {
+	failing := &fakeResolver{fn: func(*dns.Msg) (*dns.Msg, error) {
+		return nil, errors.New("unreachable")
+	}}
+	cfg := testConfig(nil)
+	cfg.Routing.Strategy = "fast"
+	cfg.Routing.Default = []string{"a", "b"}
+
+	r := newRouterWithConfig(t, cfg, map[string]upstream.Resolver{
+		"a": failing,
+		"b": failing,
+	}, nil)
+
+	resp := resolve(r, "example.com", dns.TypeA)
+	if resp.Rcode != dns.RcodeServerFailure {
+		t.Fatalf("rcode = %d", resp.Rcode)
+	}
+}
+
 func TestFirstPrefersPositiveOverNODATA(t *testing.T) {
 	nodata := &fakeResolver{fn: func(req *dns.Msg) (*dns.Msg, error) {
 		return nodataReply(req), nil
@@ -185,7 +250,7 @@ func TestFirstReturnsSERVFAILWhenAllResponsesFail(t *testing.T) {
 	}
 }
 
-func TestFirstReturnsSERVFAILOnPartialFailure(t *testing.T) {
+func TestFirstReturnsNegativeOnPartialFailure(t *testing.T) {
 	nxdomain := &fakeResolver{fn: func(req *dns.Msg) (*dns.Msg, error) {
 		return replyCode(req, dns.RcodeNameError), nil
 	}}
@@ -193,18 +258,42 @@ func TestFirstReturnsSERVFAILOnPartialFailure(t *testing.T) {
 	cfg.DNS.Timeout = config.Duration(30 * time.Millisecond)
 	cfg.Routing.Default = []string{"nxdomain", "blocked"}
 
-	c := cache.New(100, time.Second, time.Hour, 0)
+	c := cache.New(100, time.Second, time.Hour, 30*time.Second)
 	r := newRouterWithConfig(t, cfg, map[string]upstream.Resolver{
 		"nxdomain": nxdomain,
 		"blocked":  blockingResolver{},
 	}, c)
 
-	resp := resolve(r, "example.com", dns.TypeA)
-	if resp.Rcode != dns.RcodeServerFailure {
-		t.Fatalf("rcode = %d", resp.Rcode)
+	first := r.Resolve(context.Background(), request("example.com", dns.TypeA))
+	if first.Msg.Rcode != dns.RcodeNameError {
+		t.Fatalf("rcode = %d", first.Msg.Rcode)
 	}
-	if _, ok := c.Get(cacheKey(request("example.com", dns.TypeA)), time.Now()); ok {
-		t.Fatal("partial failure must not cache a negative response")
+	if first.CacheHit {
+		t.Fatal("first response must not be a cache hit")
+	}
+	second := r.Resolve(context.Background(), request("example.com", dns.TypeA))
+	if second.Msg.Rcode != dns.RcodeNameError || !second.CacheHit {
+		t.Fatalf("partial negative response must be cached: %+v", second)
+	}
+}
+
+func TestFirstCachesNegativeWhenAllResponsesValid(t *testing.T) {
+	nxdomain := &fakeResolver{fn: func(req *dns.Msg) (*dns.Msg, error) {
+		return replyCode(req, dns.RcodeNameError), nil
+	}}
+	cfg := testConfig(nil)
+	cfg.Routing.Default = []string{"nxdomain"}
+
+	c := cache.New(100, time.Second, time.Hour, 30*time.Second)
+	r := newRouterWithConfig(t, cfg, map[string]upstream.Resolver{"nxdomain": nxdomain}, c)
+
+	first := r.Resolve(context.Background(), request("example.com", dns.TypeA))
+	if first.Msg.Rcode != dns.RcodeNameError || first.CacheHit {
+		t.Fatalf("first result = %+v", first)
+	}
+	second := r.Resolve(context.Background(), request("example.com", dns.TypeA))
+	if second.Msg.Rcode != dns.RcodeNameError || !second.CacheHit {
+		t.Fatalf("second result = %+v", second)
 	}
 }
 
@@ -279,7 +368,7 @@ func newRouterWithConfig(t *testing.T, cfg *config.Config, resolvers map[string]
 	if err != nil {
 		t.Fatal(err)
 	}
-	return New(cfg, store, c, resolvers)
+	return New(cfg, store, c, resolvers, nil, nil)
 }
 
 func testConfig(ruleList []config.Rule) *config.Config {

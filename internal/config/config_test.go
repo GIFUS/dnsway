@@ -76,6 +76,19 @@ func TestLoadExplicitZeroNegativeTTL(t *testing.T) {
 	}
 }
 
+func TestLoadFastStrategy(t *testing.T) {
+	cfg := load(t, `{
+		"dns": {
+			"listen": "127.0.0.1:53",
+			"upstreams": {"cf": {"address": "1.1.1.1:53", "protocol": "udp"}}
+		},
+		"routing": {"default": ["cf"], "strategy": "fast"}
+	}`)
+	if cfg.Routing.Strategy != "fast" {
+		t.Fatalf("strategy = %q", cfg.Routing.Strategy)
+	}
+}
+
 func TestLoadAPI(t *testing.T) {
 	cfg := load(t, `{
 		"dns": {
@@ -131,6 +144,11 @@ func TestLoadInvalid(t *testing.T) {
 			name: "negative negative ttl",
 			body: `{"dns":{"listen":"127.0.0.1:53","upstreams":{"cf":{"address":"1.1.1.1:53","protocol":"udp"}}},"routing":{"default":["cf"]},"cache":{"negative_ttl":"-1s"}}`,
 			want: "cache.negative_ttl",
+		},
+		{
+			name: "removed random strategy",
+			body: `{"dns":{"listen":"127.0.0.1:53","upstreams":{"cf":{"address":"1.1.1.1:53","protocol":"udp"}}},"routing":{"default":["cf"],"strategy":"random"}}`,
+			want: "unsupported value",
 		},
 		{
 			name: "invalid api listen",

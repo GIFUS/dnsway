@@ -96,5 +96,5 @@ func testRouter(t *testing.T) *router.Router {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return router.New(cfg, store, nil, map[string]upstream.Resolver{"default": stubResolver{}})
+	return router.New(cfg, store, nil, map[string]upstream.Resolver{"default": stubResolver{}}, nil, nil)
 }

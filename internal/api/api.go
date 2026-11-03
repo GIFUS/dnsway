@@ -104,9 +104,10 @@ type cacheStats struct {
 }
 
 type statsResponse struct {
-	Cache         cacheStats       `json:"cache"`
-	Queries       stats.QueryStats `json:"queries"`
-	UptimeSeconds int64            `json:"uptime_seconds"`
+	Cache         cacheStats         `json:"cache"`
+	Queries       stats.QueryStats   `json:"queries"`
+	Runtime       stats.RuntimeStats `json:"runtime"`
+	UptimeSeconds int64              `json:"uptime_seconds"`
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
@@ -134,6 +135,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 			MaxSize: s.cacheMaxSize,
 		},
 		Queries:       snapshot.Queries,
+		Runtime:       snapshot.Runtime,
 		UptimeSeconds: snapshot.UptimeSeconds,
 	})
 }

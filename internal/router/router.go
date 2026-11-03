@@ -2,7 +2,8 @@ package router
 
 import (
 	"context"
-	"math/rand/v2"
+	"errors"
+	"log/slog"
 	"net/netip"
 	"strings"
 	"sync/atomic"
@@ -26,6 +27,10 @@ type Result struct {
 	CacheHit bool
 }
 
+type Observer interface {
+	ObserveUpstream(name string, rcode int, err error, valid bool)
+}
+
 type Router struct {
 	rules     *rules.Store
 	cache     *cache.Cache
@@ -34,9 +39,18 @@ type Router struct {
 	strategy  string
 	timeout   time.Duration
 	counter   atomic.Uint32
+	logger    *slog.Logger
+	observer  Observer
 }
 
-func New(cfg *config.Config, store *rules.Store, c *cache.Cache, upstreams map[string]upstream.Resolver) *Router {
+func New(
+	cfg *config.Config,
+	store *rules.Store,
+	c *cache.Cache,
+	upstreams map[string]upstream.Resolver,
+	logger *slog.Logger,
+	observer Observer,
+) *Router {
 	return &Router{
 		rules:     store,
 		cache:     c,
@@ -44,6 +58,8 @@ func New(cfg *config.Config, store *rules.Store, c *cache.Cache, upstreams map[s
 		defaults:  cfg.Routing.Default,
 		strategy:  cfg.Routing.Strategy,
 		timeout:   cfg.DNS.Timeout.Duration(),
+		logger:    logger,
+		observer:  observer,
 	}
 }
 
@@ -84,28 +100,29 @@ func (r *Router) resolve(ctx context.Context, req *dns.Msg, servers []string) (*
 	ctx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
 
-	resp := r.exchange(ctx, req, servers)
+	resp, cacheable := r.exchange(ctx, req, servers)
 	if resp == nil {
 		return errorReply(req, dns.RcodeServerFailure), false
 	}
 	resp.Id = req.Id
 	resp.Question = req.Question
-	if r.cache != nil {
+	if r.cache != nil && cacheable {
 		r.cache.Store(key, resp, time.Now())
 	}
 	return resp, false
 }
 
-func (r *Router) exchange(ctx context.Context, req *dns.Msg, servers []string) *dns.Msg {
+func (r *Router) exchange(ctx context.Context, req *dns.Msg, servers []string) (*dns.Msg, bool) {
 	if len(servers) == 0 {
-		return nil
+		return nil, false
 	}
 	switch r.strategy {
-	case "random":
-		return r.exchangeOne(ctx, req, servers[rand.IntN(len(servers))])
+	case "fast":
+		return r.exchangeFast(ctx, req, servers)
 	case "round_robin":
 		i := int(r.counter.Add(1)-1) % len(servers)
-		return r.exchangeOne(ctx, req, servers[i])
+		resp := r.exchangeOne(ctx, req, servers[i])
+		return resp, resp != nil
 	default:
 		return r.exchangeFirst(ctx, req, servers)
 	}
@@ -114,13 +131,34 @@ func (r *Router) exchange(ctx context.Context, req *dns.Msg, servers []string) *
 func (r *Router) exchangeOne(ctx context.Context, req *dns.Msg, name string) *dns.Msg {
 	resolver, ok := r.upstreams[name]
 	if !ok {
+		r.observeUpstream(name, nil, nil, false)
 		return nil
 	}
 	resp, err := resolver.Exchange(ctx, req.Copy())
-	if err != nil || !validResponse(req, resp) {
+	valid := err == nil && validResponse(req, resp)
+	r.observeUpstream(name, resp, err, valid)
+	if !valid {
 		return nil
 	}
 	return resp
+}
+
+func (r *Router) observeUpstream(name string, resp *dns.Msg, err error, valid bool) {
+	rcode := -1
+	if resp != nil {
+		rcode = resp.Rcode
+	}
+	if r.observer != nil {
+		r.observer.ObserveUpstream(name, rcode, err, valid)
+	}
+	if r.logger != nil {
+		r.logger.Debug("upstream result",
+			"name", name,
+			"rcode", rcode,
+			"valid", valid,
+			"err", err,
+		)
+	}
 }
 
 type firstOutcome struct {
@@ -129,7 +167,7 @@ type firstOutcome struct {
 	valid bool
 }
 
-func (r *Router) exchangeFirst(ctx context.Context, req *dns.Msg, servers []string) *dns.Msg {
+func (r *Router) exchangeFast(ctx context.Context, req *dns.Msg, servers []string) (*dns.Msg, bool) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -138,42 +176,92 @@ func (r *Router) exchangeFirst(ctx context.Context, req *dns.Msg, servers []stri
 	for index, name := range servers {
 		resolver, ok := r.upstreams[name]
 		if !ok {
+			r.observeUpstream(name, nil, nil, false)
 			continue
 		}
 		started++
-		go func(index int, resolver upstream.Resolver) {
+		go func(index int, name string, resolver upstream.Resolver) {
 			resp, err := resolver.Exchange(ctx, req.Copy())
 			outcome := firstOutcome{index: index, resp: resp}
 			if err == nil {
-				outcome.valid = validEnvelope(req, resp) && !resp.Truncated
+				outcome.valid = validResponse(req, resp)
+			}
+			if !errors.Is(err, context.Canceled) {
+				r.observeUpstream(name, resp, err, outcome.valid)
 			}
 			select {
 			case results <- outcome:
 			case <-ctx.Done():
 			}
-		}(index, resolver)
+		}(index, name, resolver)
 	}
 	if started == 0 {
-		return nil
+		return nil, false
+	}
+
+	received := 0
+	for received < started {
+		select {
+		case outcome := <-results:
+			received++
+			if outcome.valid {
+				cancel()
+				return outcome.resp, true
+			}
+		case <-ctx.Done():
+			return nil, false
+		}
+	}
+	return nil, false
+}
+
+func (r *Router) exchangeFirst(ctx context.Context, req *dns.Msg, servers []string) (*dns.Msg, bool) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	results := make(chan firstOutcome, len(servers))
+	started := 0
+	for index, name := range servers {
+		resolver, ok := r.upstreams[name]
+		if !ok {
+			r.observeUpstream(name, nil, nil, false)
+			continue
+		}
+		started++
+		go func(index int, name string, resolver upstream.Resolver) {
+			resp, err := resolver.Exchange(ctx, req.Copy())
+			outcome := firstOutcome{index: index, resp: resp}
+			if err == nil {
+				outcome.valid = validEnvelope(req, resp) && !resp.Truncated
+			}
+			if !errors.Is(err, context.Canceled) {
+				r.observeUpstream(name, resp, err, outcome.valid)
+			}
+			select {
+			case results <- outcome:
+			case <-ctx.Done():
+			}
+		}(index, name, resolver)
+	}
+	if started == 0 {
+		return nil, false
 	}
 
 	var best *dns.Msg
 	bestPriority := 0
 	bestIndex := -1
 	received := 0
-	allValid := true
 	qtype := req.Question[0].Qtype
 	for received < started {
 		select {
 		case outcome := <-results:
 			received++
 			if !outcome.valid {
-				allValid = false
 				continue
 			}
 			if positiveResponse(outcome.resp, qtype) {
 				cancel()
-				return outcome.resp
+				return outcome.resp, true
 			}
 			priority := responsePriority(outcome.resp)
 			if best == nil || priority > bestPriority || (priority == bestPriority && outcome.index > bestIndex) {
@@ -182,13 +270,16 @@ func (r *Router) exchangeFirst(ctx context.Context, req *dns.Msg, servers []stri
 				bestIndex = outcome.index
 			}
 		case <-ctx.Done():
-			return nil
+			if best != nil {
+				return best, true
+			}
+			return nil, false
 		}
 	}
-	if !allValid {
-		return nil
+	if best == nil {
+		return nil, false
 	}
-	return best
+	return best, true
 }
 
 func validEnvelope(req, resp *dns.Msg) bool {

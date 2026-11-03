@@ -190,7 +190,7 @@ func (c *Config) Validate() error {
 		c.Routing.Strategy = "first"
 	}
 	switch c.Routing.Strategy {
-	case "first", "random", "round_robin":
+	case "fast", "first", "round_robin":
 	default:
 		return fmt.Errorf("routing.strategy: unsupported value %q", c.Routing.Strategy)
 	}
