@@ -187,7 +187,7 @@ jobs:
           name: DNSway ${{ github.ref_name }}
           draft: true
           prerelease: ${{ contains(github.ref_name, '-') }}
-          generate_release_notes: false
+          generate_release_notes: true
           body: |
             ## DNSway
 
@@ -195,6 +195,5 @@ jobs:
             - **Windows:** `.zip` (AMD64 / ARM64).
             - **macOS (Darwin):** `.tar.gz` (Intel / Apple Silicon).
 
-            **Full Changelog**: https://github.com/GIFUS/dnsway/commits/${{ github.ref_name }}
           files: release-assets/*
           fail_on_unmatched_files: true
