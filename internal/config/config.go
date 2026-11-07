@@ -52,6 +52,8 @@ type Upstream struct {
 	ServerName string `json:"server_name"`
 }
 
+func (u Upstream) Host() string { return upstreamHost(u) }
+
 type Routing struct {
 	Default  []string `json:"default"`
 	Strategy string   `json:"strategy"`

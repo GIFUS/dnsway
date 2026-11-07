@@ -120,12 +120,26 @@ func (r *Router) exchange(ctx context.Context, req *dns.Msg, servers []string) (
 	case "fast":
 		return r.exchangeFast(ctx, req, servers)
 	case "round_robin":
-		i := int(r.counter.Add(1)-1) % len(servers)
-		resp := r.exchangeOne(ctx, req, servers[i])
+		available := r.availableServers(servers)
+		if len(available) == 0 {
+			return nil, false
+		}
+		i := int(r.counter.Add(1)-1) % len(available)
+		resp := r.exchangeOne(ctx, req, available[i])
 		return resp, resp != nil
 	default:
 		return r.exchangeFirst(ctx, req, servers)
 	}
+}
+
+func (r *Router) availableServers(servers []string) []string {
+	available := make([]string, 0, len(servers))
+	for _, name := range servers {
+		if _, ok := r.upstreams[name]; ok {
+			available = append(available, name)
+		}
+	}
+	return available
 }
 
 func (r *Router) exchangeOne(ctx context.Context, req *dns.Msg, name string) *dns.Msg {

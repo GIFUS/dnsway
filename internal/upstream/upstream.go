@@ -6,9 +6,12 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/netip"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,11 +25,146 @@ type Resolver interface {
 }
 
 const (
-	maxIdleStreamConns = 4
-	streamIdleTimeout  = 90 * time.Second
+	maxIdleStreamConns  = 4
+	streamIdleTimeout   = 90 * time.Second
+	bootstrapAttempts   = 3
+	bootstrapRetryDelay = 500 * time.Millisecond
 )
 
 type dialFunc func(ctx context.Context, network, address string) (net.Conn, error)
+
+type Prepared struct {
+	Resolvers map[string]Resolver
+	Ready     []string
+	Skipped   map[string]error
+}
+
+func New(cfg *config.Config) map[string]Resolver {
+	timeout := cfg.DNS.Timeout.Duration()
+	_, dial := newBootstrapDialer(cfg, timeout)
+
+	result := make(map[string]Resolver, len(cfg.DNS.Upstreams))
+	for id, u := range cfg.DNS.Upstreams {
+		result[id] = newClient(id, u, timeout, dial)
+	}
+	return result
+}
+
+func Prepare(ctx context.Context, cfg *config.Config, logger *slog.Logger) (*Prepared, error) {
+	timeout := cfg.DNS.Timeout.Duration()
+	bs, dial := newBootstrapDialer(cfg, timeout)
+	return prepare(ctx, cfg, bs, dial, timeout, logger)
+}
+
+func prepare(ctx context.Context, cfg *config.Config, bs *bootstrapper, dial dialFunc, timeout time.Duration, logger *slog.Logger) (*Prepared, error) {
+	result := &Prepared{
+		Resolvers: make(map[string]Resolver, len(cfg.DNS.Upstreams)),
+		Skipped:   make(map[string]error),
+	}
+
+	ids := make([]string, 0, len(cfg.DNS.Upstreams))
+	for id := range cfg.DNS.Upstreams {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	for _, id := range ids {
+		u := cfg.DNS.Upstreams[id]
+		host := u.Host()
+		if !isIPHost(host) {
+			if bs == nil {
+				err := fmt.Errorf("hostname %q requires dns.bootstrap", host)
+				result.Skipped[id] = err
+				logSkipped(logger, id, host, err)
+				continue
+			}
+			ips, err := bs.lookupWithRetry(ctx, host, bootstrapAttempts, bootstrapRetryDelay)
+			if err != nil {
+				result.Skipped[id] = err
+				logSkipped(logger, id, host, err)
+				continue
+			}
+			if logger != nil {
+				logger.Info("upstream ready",
+					"name", id,
+					"host", host,
+					"ips", addrStrings(ips),
+					"bootstrap", true,
+				)
+			}
+		} else if logger != nil {
+			logger.Info("upstream ready",
+				"name", id,
+				"address", u.Address,
+				"bootstrap", false,
+			)
+		}
+
+		result.Resolvers[id] = newClient(id, u, timeout, dial)
+		result.Ready = append(result.Ready, id)
+	}
+
+	if len(result.Resolvers) == 0 {
+		return result, fmt.Errorf("no upstreams available: %s", describeSkipped(result.Skipped))
+	}
+	return result, nil
+}
+
+func newBootstrapDialer(cfg *config.Config, timeout time.Duration) (*bootstrapper, dialFunc) {
+	direct := func(ctx context.Context, network, address string) (net.Conn, error) {
+		return (&net.Dialer{Timeout: timeout}).DialContext(ctx, network, address)
+	}
+
+	var bootstrap []Resolver
+	for _, id := range cfg.DNS.Bootstrap {
+		bootstrap = append(bootstrap, newClient(id, cfg.DNS.Upstreams[id], timeout, direct))
+	}
+	if len(bootstrap) == 0 {
+		return nil, direct
+	}
+
+	bs := newBootstrapper(bootstrap)
+	return bs, bs.DialContext
+}
+
+func logSkipped(logger *slog.Logger, id, host string, err error) {
+	if logger == nil {
+		return
+	}
+	logger.Warn("upstream skipped",
+		"name", id,
+		"host", host,
+		"attempts", bootstrapAttempts,
+		"err", err,
+	)
+}
+
+func describeSkipped(skipped map[string]error) string {
+	ids := make([]string, 0, len(skipped))
+	for id := range skipped {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	parts := make([]string, 0, len(ids))
+	for _, id := range ids {
+		parts = append(parts, fmt.Sprintf("%s: %v", id, skipped[id]))
+	}
+	return strings.Join(parts, "; ")
+}
+
+func addrStrings(ips []netip.Addr) []string {
+	result := make([]string, 0, len(ips))
+	for _, ip := range ips {
+		result = append(result, ip.String())
+	}
+	return result
+}
+
+func isIPHost(host string) bool {
+	_, err := netip.ParseAddr(host)
+	return err == nil
+}
 
 type Client struct {
 	name       string
@@ -38,29 +176,6 @@ type Client struct {
 	http       *http.Client
 	tlsConfig  *tls.Config
 	pool       *streamPool
-}
-
-func New(cfg *config.Config) map[string]Resolver {
-	timeout := cfg.DNS.Timeout.Duration()
-	direct := func(ctx context.Context, network, address string) (net.Conn, error) {
-		return (&net.Dialer{Timeout: timeout}).DialContext(ctx, network, address)
-	}
-
-	var bootstrap []Resolver
-	for _, id := range cfg.DNS.Bootstrap {
-		bootstrap = append(bootstrap, newClient(id, cfg.DNS.Upstreams[id], timeout, direct))
-	}
-
-	dial := direct
-	if len(bootstrap) > 0 {
-		dial = newBootstrapper(bootstrap).DialContext
-	}
-
-	result := make(map[string]Resolver, len(cfg.DNS.Upstreams))
-	for id, u := range cfg.DNS.Upstreams {
-		result[id] = newClient(id, u, timeout, dial)
-	}
-	return result
 }
 
 func newClient(name string, u config.Upstream, timeout time.Duration, dial dialFunc) *Client {
@@ -385,6 +500,29 @@ func (b *bootstrapper) lookup(ctx context.Context, host string) ([]netip.Addr, e
 	b.cache[host] = bootstrapEntry{ips: ips, expires: now.Add(ttl)}
 	b.mu.Unlock()
 	return ips, nil
+}
+
+func (b *bootstrapper) lookupWithRetry(ctx context.Context, host string, attempts int, delay time.Duration) ([]netip.Addr, error) {
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		ips, err := b.lookup(ctx, host)
+		if err == nil {
+			return ips, nil
+		}
+		lastErr = err
+		if attempt+1 == attempts {
+			break
+		}
+
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return nil, lastErr
 }
 
 func (b *bootstrapper) resolve(ctx context.Context, host string) ([]netip.Addr, time.Duration, error) {

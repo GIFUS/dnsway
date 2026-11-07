@@ -8,12 +8,15 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"io"
+	"log/slog"
 	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -261,14 +264,115 @@ func TestBootstrapLookupCaches(t *testing.T) {
 	}
 }
 
+func TestBootstrapLookupRetries(t *testing.T) {
+	fake := &fakeResolver{err: errors.New("unreachable")}
+	b := newBootstrapper([]Resolver{fake})
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	_, err := b.lookupWithRetry(ctx, "dns.example.com", bootstrapAttempts, time.Millisecond)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if fake.count < bootstrapAttempts {
+		t.Fatalf("lookups = %d, want at least %d", fake.count, bootstrapAttempts)
+	}
+}
+
+func TestPrepareIPUpstream(t *testing.T) {
+	cfg := &config.Config{
+		DNS: config.DNS{
+			Timeout: config.Duration(time.Second),
+			Upstreams: map[string]config.Upstream{
+				"cf": {Address: "1.1.1.1:53", Protocol: "udp"},
+			},
+		},
+	}
+
+	prepared, err := Prepare(context.Background(), cfg, discardLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prepared.Ready) != 1 || prepared.Ready[0] != "cf" {
+		t.Fatalf("ready = %v", prepared.Ready)
+	}
+	if prepared.Resolvers["cf"] == nil {
+		t.Fatal("cf resolver is missing")
+	}
+	if len(prepared.Skipped) != 0 {
+		t.Fatalf("skipped = %v", prepared.Skipped)
+	}
+}
+
+func TestPrepareSkipsUnresolvedHostname(t *testing.T) {
+	cfg := &config.Config{
+		DNS: config.DNS{
+			Timeout: config.Duration(time.Second),
+			Upstreams: map[string]config.Upstream{
+				"bad":  {Address: "https://bad.example/dns-query", Protocol: "doh"},
+				"good": {Address: "1.1.1.1:53", Protocol: "udp"},
+			},
+		},
+	}
+	bs := newBootstrapper([]Resolver{&fakeResolver{err: errors.New("nxdomain")}})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	defer cancel()
+
+	prepared, err := prepare(ctx, cfg, bs, directDial, time.Second, discardLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := prepared.Resolvers["bad"]; ok {
+		t.Fatal("unresolved upstream must be skipped")
+	}
+	if _, ok := prepared.Skipped["bad"]; !ok {
+		t.Fatalf("skipped = %v", prepared.Skipped)
+	}
+	if _, ok := prepared.Resolvers["good"]; !ok {
+		t.Fatal("IP upstream must be ready")
+	}
+}
+
+func TestPrepareFailsWhenAllUpstreamsSkipped(t *testing.T) {
+	cfg := &config.Config{
+		DNS: config.DNS{
+			Timeout: config.Duration(time.Second),
+			Upstreams: map[string]config.Upstream{
+				"bad": {Address: "https://bad.example/dns-query", Protocol: "doh"},
+			},
+		},
+	}
+	bs := newBootstrapper([]Resolver{&fakeResolver{err: errors.New("nxdomain")}})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	defer cancel()
+
+	prepared, err := prepare(ctx, cfg, bs, directDial, time.Second, discardLogger())
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "no upstreams available") || !strings.Contains(err.Error(), "bad") {
+		t.Fatalf("error = %v", err)
+	}
+	if len(prepared.Ready) != 0 {
+		t.Fatalf("ready = %v", prepared.Ready)
+	}
+}
+
 type fakeResolver struct {
 	ip    string
 	ttl   uint32
+	err   error
 	count int
 }
 
 func (f *fakeResolver) Exchange(ctx context.Context, req *dns.Msg) (*dns.Msg, error) {
 	f.count++
+	if f.err != nil {
+		return nil, f.err
+	}
 	msg := new(dns.Msg)
 	msg.SetReply(req)
 	rr, err := dns.NewRR(req.Question[0].Name + " " + strconv.FormatUint(uint64(f.ttl), 10) + " IN A " + f.ip)
@@ -277,6 +381,10 @@ func (f *fakeResolver) Exchange(ctx context.Context, req *dns.Msg) (*dns.Msg, er
 	}
 	msg.Answer = []dns.RR{rr}
 	return msg, nil
+}
+
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
 func dohHandler(w http.ResponseWriter, r *http.Request) {

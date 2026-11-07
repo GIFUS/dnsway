@@ -103,6 +103,55 @@ func TestFirstSkipsFailedUpstream(t *testing.T) {
 	}
 }
 
+func TestRuleUsesAvailableUpstream(t *testing.T) {
+	good := &fakeResolver{fn: answer("1.1.1.1")}
+	cfg := testConfig([]config.Rule{{
+		Match:   []string{"*.corp.example"},
+		Servers: []string{"missing", "good"},
+	}})
+	cfg.Routing.Default = []string{"good"}
+
+	r := newRouterWithConfig(t, cfg, map[string]upstream.Resolver{
+		"good": good,
+	}, nil)
+
+	result := r.Resolve(context.Background(), request("host.corp.example", dns.TypeA))
+	if len(result.Msg.Answer) != 1 || result.Msg.Answer[0].(*dns.A).A.String() != "1.1.1.1" {
+		t.Fatalf("answer = %v", result.Msg.Answer)
+	}
+}
+
+func TestRoundRobinSkipsUnavailableUpstream(t *testing.T) {
+	good := &fakeResolver{fn: answer("1.1.1.1")}
+	cfg := testConfig(nil)
+	cfg.Routing.Strategy = "round_robin"
+	cfg.Routing.Default = []string{"missing", "good"}
+
+	r := newRouterWithConfig(t, cfg, map[string]upstream.Resolver{
+		"good": good,
+	}, nil)
+
+	for i := 0; i < 3; i++ {
+		resp := resolve(r, "example.com", dns.TypeA)
+		if len(resp.Answer) != 1 || resp.Answer[0].(*dns.A).A.String() != "1.1.1.1" {
+			t.Fatalf("answer = %v", resp.Answer)
+		}
+	}
+}
+
+func TestRoundRobinReturnsSERVFAILWhenAllUnavailable(t *testing.T) {
+	cfg := testConfig(nil)
+	cfg.Routing.Strategy = "round_robin"
+	cfg.Routing.Default = []string{"missing", "also-missing"}
+
+	r := newRouterWithConfig(t, cfg, map[string]upstream.Resolver{}, nil)
+
+	resp := resolve(r, "example.com", dns.TypeA)
+	if resp.Rcode != dns.RcodeServerFailure {
+		t.Fatalf("rcode = %d", resp.Rcode)
+	}
+}
+
 func TestFirstPrefersPositiveOverNXDOMAIN(t *testing.T) {
 	negative := &fakeResolver{fn: func(req *dns.Msg) (*dns.Msg, error) {
 		return replyCode(req, dns.RcodeNameError), nil
