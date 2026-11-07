@@ -160,6 +160,56 @@ func TestLoadInvalid(t *testing.T) {
 			body: `{"dns":{"listen":"127.0.0.1:53","upstreams":{"cf":{"address":"1.1.1.1:53","protocol":"udp"}}},"routing":{"default":["cf"]},"api":{"enabled":true,"allowed_ips":["not-an-ip"]}}`,
 			want: "api.allowed_ips",
 		},
+		{
+			name: "missing dns listen",
+			body: `{"dns":{"upstreams":{"cf":{"address":"1.1.1.1:53","protocol":"udp"}}},"routing":{"default":["cf"]}}`,
+			want: "dns.listen is required",
+		},
+		{
+			name: "empty upstreams",
+			body: `{"dns":{"listen":"127.0.0.1:53","upstreams":{}},"routing":{"default":[]}}`,
+			want: "dns.upstreams is empty",
+		},
+		{
+			name: "negative dns timeout",
+			body: `{"dns":{"listen":"127.0.0.1:53","timeout":"-1s","upstreams":{"cf":{"address":"1.1.1.1:53","protocol":"udp"}}},"routing":{"default":["cf"]}}`,
+			want: "must be positive",
+		},
+		{
+			name: "empty routing default",
+			body: `{"dns":{"listen":"127.0.0.1:53","upstreams":{"cf":{"address":"1.1.1.1:53","protocol":"udp"}}},"routing":{"default":[]}}`,
+			want: "routing.default is empty",
+		},
+		{
+			name: "cache min exceeds max",
+			body: `{"dns":{"listen":"127.0.0.1:53","upstreams":{"cf":{"address":"1.1.1.1:53","protocol":"udp"}}},"routing":{"default":["cf"]},"cache":{"min_ttl":"2h","max_ttl":"1h"}}`,
+			want: "cache.min_ttl",
+		},
+		{
+			name: "rule without match",
+			body: `{"dns":{"listen":"127.0.0.1:53","upstreams":{"cf":{"address":"1.1.1.1:53","protocol":"udp"}}},"routing":{"default":["cf"]},"rules":[{"block":true}]}`,
+			want: "match or match_file",
+		},
+		{
+			name: "rule unknown upstream",
+			body: `{"dns":{"listen":"127.0.0.1:53","upstreams":{"cf":{"address":"1.1.1.1:53","protocol":"udp"}}},"routing":{"default":["cf"]},"rules":[{"match":["a.test"],"servers":["x"]}]}`,
+			want: "unknown upstream",
+		},
+		{
+			name: "bootstrap unknown upstream",
+			body: `{"dns":{"listen":"127.0.0.1:53","bootstrap":["x"],"upstreams":{"cf":{"address":"1.1.1.1:53","protocol":"udp"}}},"routing":{"default":["cf"]}}`,
+			want: "unknown upstream",
+		},
+		{
+			name: "bootstrap hostname",
+			body: `{"dns":{"listen":"127.0.0.1:53","bootstrap":["cf"],"upstreams":{"cf":{"address":"dns.example.com:53","protocol":"udp"},"dns":{"address":"1.1.1.1:53","protocol":"udp"}}},"routing":{"default":["cf"]}}`,
+			want: "must use an IP address",
+		},
+		{
+			name: "doh requires https",
+			body: `{"dns":{"listen":"127.0.0.1:53","upstreams":{"cf":{"address":"http://dns.example/dns-query","protocol":"doh"}}},"routing":{"default":["cf"]}}`,
+			want: "https URL",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

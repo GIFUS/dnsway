@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -114,6 +115,31 @@ func TestCheckUpstreamsUsesSequentialProbes(t *testing.T) {
 	}
 	if len(results) != 1 || results[0].successes != checkProbes {
 		t.Fatalf("results = %+v", results)
+	}
+}
+
+func TestLogUnavailableUpstreams(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	cfg := &config.Config{
+		Routing: config.Routing{Default: []string{"ready", "missing-default"}},
+		Rules: []config.Rule{
+			{Match: []string{"a.test"}, Servers: []string{"ready"}},
+			{Match: []string{"b.test"}, Servers: []string{"missing-rule"}},
+		},
+	}
+	resolvers := map[string]upstream.Resolver{"ready": fixedResolver(dns.RcodeSuccess)}
+
+	logUnavailableUpstreams(cfg, resolvers, logger)
+
+	line := logs.String()
+	for _, want := range []string{"default uses unavailable upstream", "upstream=missing-default", "rule uses unavailable upstream", "upstream=missing-rule"} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("logs %q do not contain %q", line, want)
+		}
+	}
+	if strings.Contains(line, "upstream=ready") {
+		t.Fatalf("available upstream must not be logged: %q", line)
 	}
 }
 

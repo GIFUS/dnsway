@@ -155,7 +155,7 @@ func parseAllowedIPs(items []string) ([]netip.Prefix, error) {
 			if err != nil {
 				return nil, err
 			}
-			prefixes = append(prefixes, prefix.Masked())
+			prefixes = append(prefixes, canonicalPrefix(prefix))
 			continue
 		}
 		addr, err := netip.ParseAddr(raw)
@@ -166,4 +166,12 @@ func parseAllowedIPs(items []string) ([]netip.Prefix, error) {
 		prefixes = append(prefixes, netip.PrefixFrom(addr, addr.BitLen()))
 	}
 	return prefixes, nil
+}
+
+func canonicalPrefix(prefix netip.Prefix) netip.Prefix {
+	addr := prefix.Addr()
+	if addr.Is4In6() && prefix.Bits() >= 96 {
+		return netip.PrefixFrom(addr.Unmap(), prefix.Bits()-96).Masked()
+	}
+	return prefix.Masked()
 }

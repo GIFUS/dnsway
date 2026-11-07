@@ -243,6 +243,40 @@ func TestStreamPoolExpiresIdleConnection(t *testing.T) {
 	}
 }
 
+func TestClientCloseClearsPool(t *testing.T) {
+	client := newClient("tcp", config.Upstream{Address: "127.0.0.1:53", Protocol: "tcp"}, time.Second, directDial)
+	idle, server := net.Pipe()
+	defer server.Close()
+	client.pool.put(&dns.Conn{Conn: idle})
+
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if len(client.pool.idle) != 0 {
+		t.Fatalf("idle connections = %d", len(client.pool.idle))
+	}
+}
+
+type countingCloser struct {
+	count int
+}
+
+func (c *countingCloser) Close() error {
+	c.count++
+	return nil
+}
+
+func TestPreparedCloseIsIdempotent(t *testing.T) {
+	closer := &countingCloser{}
+	prepared := &Prepared{closers: []io.Closer{closer, closer}}
+	prepared.Close()
+	prepared.Close()
+
+	if closer.count != 2 {
+		t.Fatalf("close calls = %d, want 2", closer.count)
+	}
+}
+
 func TestBootstrapLookupCaches(t *testing.T) {
 	fake := &fakeResolver{ip: "9.9.9.9", ttl: 120}
 	b := newBootstrapper([]Resolver{fake})
@@ -294,6 +328,7 @@ func TestPrepareIPUpstream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer prepared.Close()
 	if len(prepared.Ready) != 1 || prepared.Ready[0] != "cf" {
 		t.Fatalf("ready = %v", prepared.Ready)
 	}
@@ -324,6 +359,7 @@ func TestPrepareSkipsUnresolvedHostname(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer prepared.Close()
 	if _, ok := prepared.Resolvers["bad"]; ok {
 		t.Fatal("unresolved upstream must be skipped")
 	}

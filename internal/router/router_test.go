@@ -220,6 +220,51 @@ func TestFastSkipsInvalidResponses(t *testing.T) {
 	}
 }
 
+func TestFastSkipsTruncatedResponses(t *testing.T) {
+	truncated := &fakeResolver{fn: func(req *dns.Msg) (*dns.Msg, error) {
+		resp := new(dns.Msg)
+		resp.SetReply(req)
+		resp.Truncated = true
+		return resp, nil
+	}}
+	positive := &fakeResolver{fn: func(req *dns.Msg) (*dns.Msg, error) {
+		time.Sleep(20 * time.Millisecond)
+		return answer("1.1.1.1")(req)
+	}}
+	cfg := testConfig(nil)
+	cfg.Routing.Strategy = "fast"
+	cfg.Routing.Default = []string{"truncated", "positive"}
+
+	r := newRouterWithConfig(t, cfg, map[string]upstream.Resolver{
+		"truncated": truncated,
+		"positive":  positive,
+	}, nil)
+
+	resp := resolve(r, "example.com", dns.TypeA)
+	if len(resp.Answer) != 1 || resp.Answer[0].(*dns.A).A.String() != "1.1.1.1" {
+		t.Fatalf("answer = %v", resp.Answer)
+	}
+}
+
+func TestRoundRobinRejectsTruncatedResponses(t *testing.T) {
+	truncated := &fakeResolver{fn: func(req *dns.Msg) (*dns.Msg, error) {
+		resp := new(dns.Msg)
+		resp.SetReply(req)
+		resp.Truncated = true
+		return resp, nil
+	}}
+	cfg := testConfig(nil)
+	cfg.Routing.Strategy = "round_robin"
+	cfg.Routing.Default = []string{"truncated"}
+
+	r := newRouterWithConfig(t, cfg, map[string]upstream.Resolver{"truncated": truncated}, nil)
+
+	resp := resolve(r, "example.com", dns.TypeA)
+	if resp.Rcode != dns.RcodeServerFailure {
+		t.Fatalf("rcode = %d", resp.Rcode)
+	}
+}
+
 func TestFastReturnsSERVFAILWhenAllResponsesAreInvalid(t *testing.T) {
 	failing := &fakeResolver{fn: func(*dns.Msg) (*dns.Msg, error) {
 		return nil, errors.New("unreachable")

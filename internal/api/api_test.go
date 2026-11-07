@@ -170,6 +170,43 @@ func TestStatsDefaultsToLoopback(t *testing.T) {
 	}
 }
 
+func TestParseAllowedIPsCanonicalizesMappedIPv4Prefix(t *testing.T) {
+	prefixes, err := parseAllowedIPs([]string{"::ffff:192.0.2.0/120"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prefixes) != 1 || prefixes[0].String() != "192.0.2.0/24" {
+		t.Fatalf("prefixes = %v", prefixes)
+	}
+}
+
+func TestParseAllowedIPsRejectsInvalid(t *testing.T) {
+	if _, err := parseAllowedIPs([]string{"not-an-ip"}); err == nil {
+		t.Fatal("expected invalid address error")
+	}
+	if _, err := parseAllowedIPs([]string{"192.0.2.0/33"}); err == nil {
+		t.Fatal("expected invalid prefix error")
+	}
+}
+
+func TestStatsAllowsMappedIPv4Prefix(t *testing.T) {
+	srv, err := New(config.API{
+		Enabled:    true,
+		AllowedIPs: []string{"::ffff:127.0.0.1/120"},
+	}, stats.New(), nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "http://api/stats", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
+	srv.http.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+}
+
 func TestStatsMethodNotAllowed(t *testing.T) {
 	srv, err := New(config.API{
 		Enabled:    true,

@@ -21,7 +21,7 @@ import (
 	"dnsway/internal/watcher"
 )
 
-const version = "dev"
+var version = "dev"
 
 func main() {
 	if err := run(); err != nil {
@@ -77,6 +77,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	defer prepared.Close()
 	resolvers := prepared.Resolvers
 	logUnavailableUpstreams(cfg, resolvers, logger)
 

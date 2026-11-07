@@ -1,8 +1,10 @@
 package rules
 
 import (
+	"net/netip"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"dnsway/internal/config"
@@ -108,6 +110,53 @@ func TestNewMatcherRejectsInvalid(t *testing.T) {
 		if _, err := newMatcher([]string{p}); err == nil {
 			t.Fatalf("%q should be rejected", p)
 		}
+	}
+}
+
+func TestBuildErrors(t *testing.T) {
+	dir := t.TempDir()
+	tests := []struct {
+		name string
+		rule config.Rule
+		want string
+	}{
+		{"missing match file", config.Rule{MatchFile: "missing.txt", Block: true}, "match_file"},
+		{"invalid resolve", config.Rule{Match: []string{"a.test"}, Resolve: "not-an-ip"}, "resolve"},
+		{"missing resolve file", config.Rule{ResolveFile: []string{"missing.txt"}}, "resolve_file"},
+		{"no action", config.Rule{Match: []string{"a.test"}}, "no action"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := New(&config.Config{Dir: dir, Rules: []config.Rule{tt.rule}})
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestReadHosts(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "hosts.txt", "# comment\n192.168.1.10 nas.local printer.local # comment\nfd00::10 nas.local\n")
+	hosts := make(map[string][]netip.Addr)
+	if err := readHosts(filepath.Join(dir, "hosts.txt"), hosts); err != nil {
+		t.Fatal(err)
+	}
+	if len(hosts["nas.local"]) != 2 {
+		t.Fatalf("nas.local = %v", hosts["nas.local"])
+	}
+	if got := hosts["printer.local"]; len(got) != 1 || got[0].String() != "192.168.1.10" {
+		t.Fatalf("printer.local = %v", got)
+	}
+
+	writeFile(t, dir, "bad-hosts.txt", "192.168.1.10\n")
+	if err := readHosts(filepath.Join(dir, "bad-hosts.txt"), hosts); err == nil {
+		t.Fatal("expected missing hostname error")
+	}
+
+	writeFile(t, dir, "bad-ip.txt", "not-an-ip nas.local\n")
+	if err := readHosts(filepath.Join(dir, "bad-ip.txt"), hosts); err == nil {
+		t.Fatal("expected invalid IP error")
 	}
 }
 

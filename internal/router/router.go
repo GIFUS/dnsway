@@ -305,7 +305,7 @@ func validEnvelope(req, resp *dns.Msg) bool {
 }
 
 func validResponse(req, resp *dns.Msg) bool {
-	if !validEnvelope(req, resp) {
+	if !validEnvelope(req, resp) || resp.Truncated {
 		return false
 	}
 	return resp.Rcode == dns.RcodeSuccess || resp.Rcode == dns.RcodeNameError

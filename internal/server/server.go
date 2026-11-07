@@ -14,26 +14,35 @@ import (
 )
 
 type Server struct {
-	udp *dns.Server
-	tcp *dns.Server
+	udp     *dns.Server
+	tcp     *dns.Server
+	handler func(context.Context) dns.Handler
 }
 
 func New(addr string, r *router.Router, logger *slog.Logger, collector *stats.Collector) *Server {
-	handler := newHandler(r, logger, collector)
+	handler := func(ctx context.Context) dns.Handler {
+		return newHandlerContext(ctx, r, logger, collector)
+	}
+	h := handler(context.Background())
 	return &Server{
-		udp: &dns.Server{Addr: addr, Net: "udp", Handler: handler, UDPSize: dns.MaxMsgSize},
-		tcp: &dns.Server{Addr: addr, Net: "tcp", Handler: handler},
+		udp:     &dns.Server{Addr: addr, Net: "udp", Handler: h, UDPSize: dns.MaxMsgSize},
+		tcp:     &dns.Server{Addr: addr, Net: "tcp", Handler: h},
+		handler: handler,
 	}
 }
 
 func newHandler(r *router.Router, logger *slog.Logger, collector *stats.Collector) dns.Handler {
+	return newHandlerContext(context.Background(), r, logger, collector)
+}
+
+func newHandlerContext(ctx context.Context, r *router.Router, logger *slog.Logger, collector *stats.Collector) dns.Handler {
 	return dns.HandlerFunc(func(w dns.ResponseWriter, req *dns.Msg) {
 		if collector != nil {
 			collector.QueryStarted()
 			defer collector.QueryFinished()
 		}
 		start := time.Now()
-		result := r.Resolve(context.Background(), req)
+		result := r.Resolve(ctx, req)
 		elapsed := time.Since(start)
 		if collector != nil {
 			collector.Record(result, elapsed)
@@ -78,6 +87,10 @@ func rcodeName(rcode int) string {
 }
 
 func (s *Server) Run(ctx context.Context) error {
+	handler := s.handler(ctx)
+	s.udp.Handler = handler
+	s.tcp.Handler = handler
+
 	errs := make(chan error, 2)
 	go func() { errs <- s.udp.ListenAndServe() }()
 	go func() { errs <- s.tcp.ListenAndServe() }()

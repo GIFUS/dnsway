@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -49,12 +50,17 @@ func (w *Watcher) Run(ctx context.Context) {
 	defer w.fs.Close()
 
 	var timer *time.Timer
+	var reloads sync.WaitGroup
+	defer func() {
+		if timer != nil && timer.Stop() {
+			reloads.Done()
+		}
+		reloads.Wait()
+	}()
+
 	for {
 		select {
 		case <-ctx.Done():
-			if timer != nil {
-				timer.Stop()
-			}
 			return
 		case event, ok := <-w.fs.Events:
 			if !ok {
@@ -63,10 +69,14 @@ func (w *Watcher) Run(ctx context.Context) {
 			if !w.watched(event.Name) {
 				continue
 			}
-			if timer != nil {
-				timer.Stop()
+			if timer != nil && timer.Stop() {
+				reloads.Done()
 			}
-			timer = time.AfterFunc(debounce, w.run)
+			reloads.Add(1)
+			timer = time.AfterFunc(debounce, func() {
+				defer reloads.Done()
+				w.run()
+			})
 		case err, ok := <-w.fs.Errors:
 			if !ok {
 				return

@@ -37,6 +37,7 @@ type Prepared struct {
 	Resolvers map[string]Resolver
 	Ready     []string
 	Skipped   map[string]error
+	closers   []io.Closer
 }
 
 func New(cfg *config.Config) map[string]Resolver {
@@ -60,6 +61,13 @@ func prepare(ctx context.Context, cfg *config.Config, bs *bootstrapper, dial dia
 	result := &Prepared{
 		Resolvers: make(map[string]Resolver, len(cfg.DNS.Upstreams)),
 		Skipped:   make(map[string]error),
+	}
+	if bs != nil {
+		for _, resolver := range bs.resolvers {
+			if closer, ok := resolver.(io.Closer); ok {
+				result.closers = append(result.closers, closer)
+			}
+		}
 	}
 
 	ids := make([]string, 0, len(cfg.DNS.Upstreams))
@@ -100,14 +108,27 @@ func prepare(ctx context.Context, cfg *config.Config, bs *bootstrapper, dial dia
 			)
 		}
 
-		result.Resolvers[id] = newClient(id, u, timeout, dial)
+		client := newClient(id, u, timeout, dial)
+		result.Resolvers[id] = client
 		result.Ready = append(result.Ready, id)
+		result.closers = append(result.closers, client)
 	}
 
 	if len(result.Resolvers) == 0 {
+		result.Close()
 		return result, fmt.Errorf("no upstreams available: %s", describeSkipped(result.Skipped))
 	}
 	return result, nil
+}
+
+func (p *Prepared) Close() {
+	if p == nil {
+		return
+	}
+	for _, closer := range p.closers {
+		_ = closer.Close()
+	}
+	p.closers = nil
 }
 
 func newBootstrapDialer(cfg *config.Config, timeout time.Duration) (*bootstrapper, dialFunc) {
@@ -214,7 +235,7 @@ func newClient(name string, u config.Upstream, timeout time.Duration, dial dialF
 
 func (c *Client) Close() error {
 	if c.pool != nil {
-		c.pool.close()
+		c.pool.clear()
 	}
 	if c.http != nil {
 		c.http.CloseIdleConnections()
@@ -284,10 +305,6 @@ func (p *streamPool) clear() {
 	for _, item := range idle {
 		_ = item.conn.Conn.Close()
 	}
-}
-
-func (p *streamPool) close() {
-	p.clear()
 }
 
 func (c *Client) Exchange(ctx context.Context, req *dns.Msg) (*dns.Msg, error) {
