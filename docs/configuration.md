@@ -152,6 +152,17 @@ Rules for bootstrap:
 
 Bootstrap is not used for upstreams whose addresses are already IP literals.
 
+At startup, DNSway resolves every hostname-based upstream before it opens the
+DNS listener or API. Each hostname is attempted up to three times with a short
+delay. IP-based upstreams are ready immediately. A hostname that cannot be
+resolved after all attempts is logged and skipped; its client is not added to
+the upstream pool. If every upstream is skipped, startup fails and the error
+lists the unavailable upstreams.
+
+An upstream that is skipped remains in `routing.default` and
+`rules[].servers`, but requests routed to it alone receive `SERVFAIL`. If a
+rule or default list also contains a ready upstream, the ready upstream is used.
+
 ### `dns.upstreams`
 
 A map of upstream IDs to resolver definitions. IDs are referenced by
@@ -275,9 +286,10 @@ A non-empty list of upstream IDs. It is used only when no rule matches. Even if
 }
 ```
 
-Every ID must exist in `dns.upstreams`. For `first` and `fast`, all upstreams
-are raced. For `first`, the list order breaks fallback ties. For
-`round_robin`, the list is the selection pool.
+Every ID must exist in `dns.upstreams`. For `first` and `fast`, all available
+upstreams are raced. For `first`, the list order breaks fallback ties. For
+`round_robin`, the list is the selection pool. Upstreams skipped during
+bootstrap are ignored; if none remain, the query returns `SERVFAIL`.
 
 ### `routing.strategy`
 
@@ -287,7 +299,7 @@ Controls how multiple upstreams are used for one forwarded query.
 | --- | --- |
 | `fast` | Race all upstreams and use the first valid `NOERROR` or `NXDOMAIN` response |
 | `first` | Race all upstreams and prefer the first successful positive response; negatives are fallbacks |
-| `round_robin` | Rotate through the selected upstreams using a global counter |
+| `round_robin` | Rotate through the available selected upstreams using a global counter |
 
 `fast` returns the first valid `NOERROR` or `NXDOMAIN` response and cancels the
 remaining requests. It ignores `SERVFAIL`, `REFUSED`, transport errors, and
@@ -303,7 +315,9 @@ NODATA, then another DNS error. Ties use the later upstream in the list. A
 valid fallback is cached even if some upstreams fail or time out. If no usable
 response is available, DNSway returns `SERVFAIL`; `SERVFAIL` is never cached.
 
-`round_robin` uses one upstream and returns `SERVFAIL` on failure.
+`round_robin` uses one upstream and returns `SERVFAIL` on failure. Upstreams
+skipped during bootstrap are excluded from rotation. If every upstream in the
+selected list was skipped, the query returns `SERVFAIL`.
 
 ```json
 {
@@ -455,7 +469,9 @@ answers.
 ```
 
 Each listed ID must exist in `dns.upstreams`. The selected upstreams use the
-cache and `routing.strategy` in the same way as `routing.default`.
+cache and `routing.strategy` in the same way as `routing.default`. If an
+upstream was skipped during bootstrap, it is ignored; if no listed upstream is
+available, the query returns `SERVFAIL`.
 
 #### `resolve_file`
 
@@ -833,8 +849,10 @@ Configure `dns` as:
 }
 ```
 
-Bootstrap upstreams must use IP literals. The resolved address is cached
-temporarily.
+Bootstrap upstreams must use IP literals. Hostname-based upstreams are resolved
+before the DNS listener starts. Each hostname is retried up to three times, and
+the resolved address is cached temporarily. A hostname that still cannot be
+resolved is logged and skipped.
 
 ### 9. Disable or Bound the Cache
 
