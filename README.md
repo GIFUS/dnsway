@@ -161,12 +161,13 @@ The sample listens on `0.0.0.0:53`. For unprivileged testing, change `dns.listen
 | `-config` | `config.json` | Path to the JSON configuration file |
 | `-check` | `false` | Validate the configuration and probe all upstreams, then exit |
 | `-log-level` | `info` | `debug`, `info`, `warn`, or `error` |
+| `-version` | `false` | Print the version and exit |
 
 ## Security and Limitations
 
 DNSway is designed for trusted local networks.
 
-- There is no access control, authentication, or rate limiting. Bind it to a trusted interface and use a firewall.
+- The DNS listener has no access control, authentication, or rate limiting. The optional stats API has an IP allowlist (`api.allowed_ips`) but no authentication. Bind both to trusted interfaces and use a firewall.
 - DoT and DoH certificate verification is always enabled.
 - DNSway does not validate DNSSEC and is not a recursive or authoritative resolver.
 - The JSON configuration is loaded at startup. Only files referenced by `match_file` and `resolve_file` are hot-reloaded.

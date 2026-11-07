@@ -920,5 +920,6 @@ privileges.
   `resolve_file` are watched.
 - Lists and hosts files are limited to 32 MiB each.
 - The cache is in memory only and is lost on restart.
-- There is no access control, authentication, or rate limiting; use a firewall
-  and bind to a trusted interface.
+- The DNS listener has no access control, authentication, or rate limiting. The
+  optional stats API has an IP allowlist (`api.allowed_ips`) but no
+  authentication. Use a firewall and bind both to trusted interfaces.
